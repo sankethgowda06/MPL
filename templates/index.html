@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MPL Cricket League - Auction Management</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>🏏 MPL Cricket League - Auction Management</h1>
+            <nav class="nav">
+                <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+                <button class="nav-btn" data-tab="teams">Teams</button>
+                <button class="nav-btn" data-tab="auction">Auction</button>
+                <button class="nav-btn" data-tab="players">Players</button>
+                <button class="nav-btn" data-tab="export">Export</button>
+                <a href="/bidding" style="text-decoration: none;"><button class="nav-btn" style="background: #10b981; border: none; cursor: pointer;">💰 Advanced Bidding</button></a>
+            </nav>
+        </header>
+
+        <!-- Dashboard Tab -->
+        <section id="dashboard" class="tab-content active">
+            <div class="dashboard-grid">
+                <div class="stat-card">
+                    <h3>Total Players</h3>
+                    <p class="stat-value" id="total-players">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Available Players</h3>
+                    <p class="stat-value" id="available-players">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Auctioned</h3>
+                    <p class="stat-value" id="auctioned-players">0</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Active Teams</h3>
+                    <p class="stat-value" id="active-teams">0</p>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Team Rankings</h2>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Team Name</th>
+                            <th>Players</th>
+                            <th>Budget Spent</th>
+                            <th>Available Budget</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dashboard-teams">
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Teams Tab -->
+        <section id="teams" class="tab-content">
+            <div class="section">
+                <h2>Create New Team</h2>
+                <div class="form-group">
+                    <input type="text" id="team-name" placeholder="Enter team name" class="input">
+                    <button onclick="createTeam()" class="btn btn-primary">Create Team</button>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Teams List</h2>
+                <div id="teams-list" class="teams-grid">
+                </div>
+            </div>
+        </section>
+
+        <!-- Auction Tab -->
+        <section id="auction" class="tab-content">
+            <div class="section">
+                <h2>Player Auction</h2>
+                
+                <div class="auction-controls">
+                    <div class="form-group">
+                        <label>Select Team</label>
+                        <select id="auction-team" class="input">
+                            <option value="">-- Select Team --</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Select Player</label>
+                        <select id="auction-player" class="input">
+                            <option value="">-- Select Player --</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Bid Price (Min: 1000)</label>
+                        <input type="number" id="auction-price" value="1000" min="1000" step="100" class="input">
+                    </div>
+
+                    <button onclick="auctionPlayer()" class="btn btn-success">Add Player to Team</button>
+                </div>
+
+                <div id="auction-feedback" class="feedback"></div>
+            </div>
+
+            <div class="section">
+                <h2>Recent Auctions</h2>
+                <div id="auction-history" class="auction-list">
+                </div>
+            </div>
+        </section>
+
+        <!-- Players Tab -->
+        <section id="players" class="tab-content">
+            <div class="section">
+                <h2>Import Players from Excel</h2>
+                <div class="form-group">
+                    <input type="file" id="excel-file" accept=".xlsx" class="input">
+                    <button onclick="importPlayers()" class="btn btn-primary">Import Players</button>
+                </div>
+                <div id="import-feedback" class="feedback"></div>
+            </div>
+
+            <div class="section">
+                <h2>Available Players</h2>
+                <div class="players-grid" id="players-list">
+                </div>
+            </div>
+        </section>
+
+        <!-- Export Tab -->
+        <section id="export" class="tab-content">
+            <div class="section">
+                <h2>Export Data</h2>
+                <p>Download all league data including teams, rosters, and available players.</p>
+                <button onclick="exportData()" class="btn btn-primary btn-lg">📥 Download Excel Report</button>
+            </div>
+        </section>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

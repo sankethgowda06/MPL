@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Player Bidding - MPL Cricket League</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='bidding-live.css') }}">
+</head>
+<body>
+    <div class="bidding-live-container">
+        <!-- Header -->
+        <header class="live-header">
+            <h1>🏏 Live Auction System</h1>
+            <a href="/" class="back-btn">← Dashboard</a>
+        </header>
+
+        <div class="main-layout">
+            <!-- Left Panel: Teams (30%) -->
+            <div class="left-panel">
+                <h3>Teams - Click to Bid</h3>
+                <div class="teams-compact-grid" id="teams-grid">
+                    <!-- Teams will be populated here -->
+                </div>
+            </div>
+
+            <!-- Right Panel: Player Profile (70%) -->
+            <div class="right-panel">
+                <!-- View Mode Tabs -->
+                <div class="view-tabs">
+                    <button class="tab-btn active" onclick="switchView('bidding')">🏏 Bidding</button>
+                    <button class="tab-btn" onclick="switchView('team-view')">👥 Team View</button>
+                </div>
+
+                <!-- Bidding View -->
+                <div id="bidding-view" class="view-container active">
+                    <!-- Search Section -->
+                    <div class="search-box">
+                        <label>Search Player:</label>
+                        <div class="search-input-group">
+                            <input type="text" id="player-search" placeholder="Number or Name" class="input-number" onkeypress="handleEnter(event)">
+                            <button onclick="searchPlayer()" class="search-btn">Search</button>
+                        </div>
+                    </div>
+
+                    <!-- Player Details & Photo Container -->
+                    <div class="player-display-container">
+                        <!-- Player Details (Left part of right panel) -->
+                        <div class="player-details-section">
+                            <div id="player-info" class="player-info hidden">
+                                <div class="info-card">
+                                    <div class="info-label">Serial Number</div>
+                                    <div class="info-value" id="player-serial">-</div>
+                                </div>
+                                <div class="info-card">
+                                    <div class="info-label">Player Name</div>
+                                    <div class="info-value" id="player-name">-</div>
+                                </div>
+                                <div class="info-card">
+                                    <div class="info-label">Role</div>
+                                    <div class="info-value" id="player-role">-</div>
+                                </div>
+                                <div class="info-card base-points">
+                                    <div class="info-label">Base Points</div>
+                                    <div class="info-value">₹1000</div>
+                                </div>
+                            </div>
+                            <div id="player-placeholder" class="placeholder">
+                                <p>Enter player number to view details</p>
+                            </div>
+                        </div>
+
+                        <!-- Player Photo (Right part of right panel) -->
+                        <div class="player-photo-section">
+                            <div id="player-photo" class="player-photo">
+                                <div class="photo-placeholder">📷</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Team View -->
+                <div id="team-view" class="view-container hidden">
+                    <div class="team-view-selector">
+                        <label>Select Team:</label>
+                        <select id="team-selector" onchange="loadTeamPlayers()" class="team-select">
+                            <option value="">-- Choose a Team --</option>
+                        </select>
+                    </div>
+                    <div id="team-players-list" class="team-players-list">
+                        <!-- Team players will be populated here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bid Modal -->
+        <div id="bid-modal" class="modal hidden">
+            <div class="modal-content">
+                <button class="close-btn" onclick="closeBidModal()">×</button>
+                <h2>Place Your Bid</h2>
+                
+                <div class="bid-summary">
+                    <div class="summary-row">
+                        <span class="label">Player:</span>
+                        <span id="bid-player-name" class="value">-</span>
+                    </div>
+                    <div class="summary-row">
+                        <span class="label">Team:</span>
+                        <span id="bid-team-name" class="value">-</span>
+                    </div>
+                    <div class="summary-row">
+                        <span class="label">Base Price:</span>
+                        <span id="bid-base-price" class="value">₹1000</span>
+                    </div>
+                    <div class="summary-row">
+                        <span class="label">Team Remaining Budget:</span>
+                        <span id="bid-budget" class="value">-</span>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Enter Bid Amount:</label>
+                    <input type="number" id="bid-amount" class="input-bid" value="1000" min="1000" step="100">
+                </div>
+
+                <div id="bid-error" class="error-message hidden"></div>
+
+                <div class="modal-buttons">
+                    <button onclick="confirmBid()" class="btn-confirm">✓ Confirm Bid</button>
+                    <button onclick="closeBidModal()" class="btn-cancel">✗ Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Notification -->
+        <div id="notification" class="notification hidden"></div>
+    </div>
+
+    <script src="{{ url_for('static', filename='bidding-live.js') }}"></script>
+</body>
+</html>
+
