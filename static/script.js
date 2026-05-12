@@ -249,6 +249,7 @@ async function loadPlayers() {
                         <div class="player-actions">
                             <input type="file" id="player-photo-input-${player.id}" class="hidden-file-input" accept="image/*" onchange="uploadPlayerPhoto(${player.id}, this)">
                             <button class="btn btn-primary btn-sm" onclick="triggerPlayerPhotoUpload(${player.id})">Update Photo</button>
+                            <button class="btn btn-danger btn-sm" onclick="deletePlayer(${player.id})">Delete</button>
                         </div>
                     </div>
                 </div>
@@ -307,6 +308,24 @@ async function addPlayerManual() {
     } catch (error) {
         console.error('Error:', error);
         showFeedback(error.message || 'Error adding player', 'error', 'players');
+    }
+}
+
+async function deletePlayer(playerId) {
+    if (!confirm('Are you sure you want to delete this player?')) return;
+
+    try {
+        const response = await fetch(`/api/players/${playerId}`, { method: 'DELETE' });
+        if (response.ok) {
+            loadPlayers();
+            loadDashboard();
+        } else {
+            const result = await parseJsonResponse(response);
+            showFeedback(result.error || 'Error deleting player', 'error', 'players');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showFeedback('Error deleting player', 'error', 'players');
     }
 }
 
