@@ -69,7 +69,7 @@ def extract_players_and_photos():
             photo_file = PHOTOS_DIR / f"player_{idx}.{extension}"
             with open(photo_file, "wb") as f:
                 f.write(image.blob)
-            photo_path = str(photo_file)
+            photo_path = os.path.basename(photo_file.name)
 
         name, role = parse_player_from_slide(slide)
         if not name:

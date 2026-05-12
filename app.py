@@ -15,8 +15,8 @@ app = Flask(__name__, static_folder='static', static_url_path='/static')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mpl_league.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['PLAYER_PHOTOS_FOLDER'] = 'player_photos'
-app.config['TEAM_LOGOS_FOLDER'] = 'team_logos'
+app.config['PLAYER_PHOTOS_FOLDER'] = os.path.join(app.static_folder, 'player_photos')
+app.config['TEAM_LOGOS_FOLDER'] = os.path.join(app.static_folder, 'team_logos')
 app.config['REPORTS_FOLDER'] = 'reports'
 
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
@@ -71,18 +71,18 @@ class Player(db.Model):
     auctioned_players = db.relationship('AuctionedPlayer', backref='player_ref', lazy=True)
 
     def to_dict(self):
-        # Extract filename from photo_path
         photo_url = None
+        photo_filename = None
         if self.photo_path:
             photo_filename = os.path.basename(self.photo_path)
-            photo_url = f'/photos/{photo_filename}'
+            photo_url = player_photo_public_url(photo_filename)
         
         return {
             'id': self.id,
             'serial_number': self.serial_number,
             'name': self.name,
             'role': self.role,
-            'photo_path': self.photo_path,
+            'photo_path': photo_filename,
             'photo_url': photo_url,
             'is_available': self.is_available
         }
@@ -178,7 +178,28 @@ def team_logo_public_url(logo_filename):
         v = int(os.path.getmtime(path))
     except OSError:
         v = 0
-    return f'/team-logos/{logo_filename}?v={v}'
+    return f"{app.static_url_path.rstrip('/')}/team_logos/{logo_filename}?v={v}"
+
+
+def player_photo_public_url(photo_path):
+    if not photo_path:
+        return None
+    photo_filename = os.path.basename(photo_path)
+    return f"{app.static_url_path.rstrip('/')}/player_photos/{photo_filename}"
+
+
+def resolve_player_photo_path(photo_path):
+    if not photo_path:
+        return None
+    if os.path.isabs(photo_path) and os.path.exists(photo_path):
+        return photo_path
+    photo_filename = os.path.basename(photo_path)
+    return os.path.join(app.config['PLAYER_PHOTOS_FOLDER'], photo_filename)
+
+
+# Ensure static upload folders exist on app startup.
+ensure_dir(app.config['PLAYER_PHOTOS_FOLDER'])
+ensure_dir(app.config['TEAM_LOGOS_FOLDER'])
 
 
 def cleanup_orphan_bid_data():
@@ -290,7 +311,7 @@ def build_team_players_pdf(output_path):
             card_x = margin_x
             card_y = y - card_h
             player = auctioned.player_ref
-            photo_path = player.photo_path
+            photo_file_path = resolve_player_photo_path(player.photo_path)
 
             # Card background
             pdf.setFillColor(colors.HexColor("#F8FAFC"))
@@ -301,9 +322,9 @@ def build_team_players_pdf(output_path):
             # Photo block
             photo_x = card_x + 10
             photo_y = card_y + (card_h - photo_h) / 2
-            if photo_path and os.path.exists(photo_path):
+            if photo_file_path and os.path.exists(photo_file_path):
                 try:
-                    img = ImageReader(photo_path)
+                    img = ImageReader(photo_file_path)
                     pdf.drawImage(
                         img,
                         photo_x,
@@ -343,23 +364,6 @@ def build_team_players_pdf(output_path):
         y -= 10
 
     pdf.save()
-
-@app.route('/photos/<filename>')
-def get_photo(filename):
-    try:
-        photos_dir = app.config['PLAYER_PHOTOS_FOLDER']
-        return send_from_directory(photos_dir, filename)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 404
-
-@app.route('/team-logos/<filename>')
-def get_team_logo(filename):
-    try:
-        logos_dir = app.config['TEAM_LOGOS_FOLDER']
-        ensure_dir(logos_dir)
-        return send_from_directory(logos_dir, filename)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 404
 
 @app.route('/')
 def index():
@@ -518,7 +522,7 @@ def upload_player_photo(player_id):
     save_path = os.path.join(photos_dir, filename)
     file.save(save_path)
 
-    player.photo_path = os.path.abspath(save_path)
+    player.photo_path = filename
     db.session.commit()
 
     return jsonify({

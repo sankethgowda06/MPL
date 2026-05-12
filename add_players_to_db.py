@@ -19,7 +19,9 @@ with app.app_context():
         serial_number = player_data['serial_number']
         player_name = player_data['name']
         role = player_data['role']
-        photo_path = player_data['photo_path']
+        photo_path = player_data.get('photo_path')
+        if photo_path:
+            photo_path = os.path.basename(photo_path)
 
         # Keep DB synced with PPT by serial number
         existing_player = Player.query.filter_by(serial_number=serial_number).first()
