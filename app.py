@@ -498,6 +498,8 @@ def player_detail(player_id):
     player = Player.query.get_or_404(player_id)
     
     if request.method == 'DELETE':
+        AuctionedPlayer.query.filter_by(player_id=player.id).delete(synchronize_session=False)
+        TeamLog.query.filter_by(player_id=player.id).delete(synchronize_session=False)
         db.session.delete(player)
         db.session.commit()
         return '', 204
