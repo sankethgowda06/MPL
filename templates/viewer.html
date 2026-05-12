@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MPL Live Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='viewer.css') }}">
+</head>
+<body>
+    <header class="header">
+        <div class="title-wrap">
+            <h1>Live Bidding Viewer</h1>
+            <p>Read-only scoreboard for mobile users</p>
+        </div>
+        <div class="meta">
+            <span id="last-updated">Updating...</span>
+        </div>
+    </header>
+
+    <main class="page">
+        <section>
+            <h2>Teams</h2>
+            <div id="teams-grid" class="teams-grid"></div>
+        </section>
+    </main>
+
+    <div id="team-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h3 id="modal-team-name">Team</h3>
+                    <p id="modal-team-meta"></p>
+                </div>
+                <button id="close-modal" class="close-btn" type="button">X</button>
+            </div>
+            <div class="section-title">Bidded Players</div>
+            <div id="team-players" class="players-list"></div>
+            <div class="section-title">Team Log</div>
+            <div id="team-logs" class="team-logs"></div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='viewer.js') }}"></script>
+</body>
+</html>

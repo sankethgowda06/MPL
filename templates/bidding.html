@@ -4,14 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Player Bidding - MPL Cricket League</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='bidding-live.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='bidding-live.css') }}?v=3">
 </head>
 <body>
     <div class="bidding-live-container">
         <!-- Header -->
         <header class="live-header">
-            <h1>🏏 Live Auction System</h1>
-            <a href="/" class="back-btn">← Dashboard</a>
+            <div class="live-header-top">
+                <h1>🏏 Live Auction System</h1>
+                <a href="/" class="back-btn">← Dashboard</a>
+            </div>
+            <div class="auction-tools-bar" role="toolbar" aria-label="Auction repair">
+                <button type="button" class="sync-auction-btn" onclick="syncAuctionAvailability()" title="Removes leftover bids for deleted teams and fixes stuck players. Your current teams stay.">↻ Fix player pool</button>
+                <button type="button" class="reset-auction-btn" onclick="resetAuction()" title="Wipes every bid and viewer log; all players go back to the pool. Teams are kept.">↺ Clear all bids</button>
+                <p class="auction-tools-hint">If you deleted a team but players were still on that team, click <strong>Fix player pool</strong>. To start the auction from scratch, use <strong>Clear all bids</strong>.</p>
+            </div>
         </header>
 
         <div class="main-layout">
@@ -47,6 +54,7 @@
                         <!-- Player Details (Left part of right panel) -->
                         <div class="player-details-section">
                             <div id="player-info" class="player-info hidden">
+                                <div id="player-sold-notice" class="player-sold-notice hidden"></div>
                                 <div class="info-card">
                                     <div class="info-label">Serial Number</div>
                                     <div class="info-value" id="player-serial">-</div>
@@ -136,7 +144,7 @@
         <div id="notification" class="notification hidden"></div>
     </div>
 
-    <script src="{{ url_for('static', filename='bidding-live.js') }}"></script>
+    <script src="{{ url_for('static', filename='bidding-live.js') }}?v=3"></script>
 </body>
 </html>
 

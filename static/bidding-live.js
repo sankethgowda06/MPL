@@ -10,10 +10,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTeams();
 });
 
-// Load all available players
+// Full player list so search by jersey # works even for already-auctioned players
 async function loadPlayers() {
     try {
-        const response = await fetch('/api/players?available=true');
+        const response = await fetch('/api/players');
         allPlayers = await response.json();
     } catch (error) {
         console.error('Error loading players:', error);
@@ -43,19 +43,21 @@ async function searchPlayer() {
     }
 
     let player = null;
+    const asNum = parseInt(searchInput, 10);
 
-    // Try to find by serial number first (if input is a number)
-    if (!isNaN(searchInput)) {
-        player = allPlayers.find(p => p.serial_number === parseInt(searchInput));
-    }
-
-    // If not found by number, try by name (partial match)
-    if (!player) {
-        player = allPlayers.find(p => p.name.toLowerCase().includes(searchInput));
+    // Try jersey / list serial first when input looks numeric (avoid strict === type mismatches)
+    if (!Number.isNaN(asNum) && Number.isFinite(asNum)) {
+        player = allPlayers.find(p => Number(p.serial_number) === asNum);
     }
 
     if (!player) {
-        showNotification('Player not found', 'error');
+        player = allPlayers.find(p => (p.name && p.name.toLowerCase().includes(searchInput)));
+    }
+
+    if (!player) {
+        showNotification('No player with that number or name. Check the serial on the Dashboard Players tab.', 'error');
+        const bannerMiss = document.getElementById('player-sold-notice');
+        if (bannerMiss) bannerMiss.classList.add('hidden');
         document.getElementById('player-info').classList.add('hidden');
         document.getElementById('player-placeholder').style.display = 'block';
         document.getElementById('player-photo').innerHTML = '<div class="photo-placeholder">📷</div>';
@@ -82,6 +84,16 @@ function displayPlayerDetails() {
     document.getElementById('player-role').textContent = currentPlayer.role;
     document.getElementById('player-serial').textContent = `#${currentPlayer.serial_number}`;
 
+    const soldBanner = document.getElementById('player-sold-notice');
+    if (soldBanner) {
+        if (currentPlayer.is_available === false) {
+            soldBanner.textContent = 'This player is already on a team. Use Team View to remove them from that team, or Clear all bids to reset the whole auction.';
+            soldBanner.classList.remove('hidden');
+        } else {
+            soldBanner.classList.add('hidden');
+        }
+    }
+
     // Show player info and hide placeholder
     document.getElementById('player-info').classList.remove('hidden');
     document.getElementById('player-placeholder').style.display = 'none';
@@ -102,7 +114,7 @@ function renderTeamsGrid() {
     allTeams.forEach(team => {
         const budgetUsed = team.total_spent;
         const budgetRemaining = team.budget - budgetUsed;
-        const canBid = currentPlayer && budgetRemaining >= 1000;
+        const canBid = currentPlayer && currentPlayer.is_available !== false && budgetRemaining >= 1000;
         const budgetCritical = budgetRemaining < 10000;
 
         const teamCard = `
@@ -136,7 +148,7 @@ function renderTeamsGrid() {
                     </button>
                 ` : `
                     <button class="bid-btn-compact" disabled>
-                        ${!currentPlayer ? '⚠ Select Player' : '❌ No Budget'}
+                        ${!currentPlayer ? '⚠ Select Player' : (currentPlayer.is_available === false ? '⚠ Already on a team' : '❌ No Budget')}
                     </button>
                 `}
             </div>
@@ -226,7 +238,8 @@ async function confirmBid() {
             setTimeout(() => {
                 loadPlayers();
                 loadTeams();
-                document.getElementById('player-number').value = '';
+                const searchEl = document.getElementById('player-search');
+                if (searchEl) searchEl.value = '';
                 document.getElementById('player-info').classList.add('hidden');
                 document.getElementById('player-placeholder').style.display = 'block';
                 document.getElementById('player-photo').innerHTML = '<div class="photo-placeholder">📷</div>';
@@ -258,7 +271,7 @@ function showNotification(message, type = 'success') {
 // Auto-refresh teams every 2 seconds
 setInterval(() => {
     loadTeams();
-    // Also refresh team selector options
+    loadPlayers();
     updateTeamSelector();
 }, 2000);
 
@@ -377,5 +390,65 @@ async function removePlayerFromTeam(teamId, playerId, playerName) {
     } catch (error) {
         console.error('Error removing player:', error);
         showNotification('Error removing player', 'error');
+    }
+}
+
+async function syncAuctionAvailability() {
+    try {
+        const response = await fetch('/api/auction/sync-availability', { method: 'POST' });
+        const data = await response.json();
+
+        if (response.ok) {
+            showNotification(data.message || 'Synced', 'success');
+            await loadPlayers();
+            renderTeamsGrid();
+            if (currentPlayer) {
+                const refreshed = allPlayers.find(p => p.id === currentPlayer.id);
+                if (refreshed) {
+                    currentPlayer = refreshed;
+                    displayPlayerDetails();
+                }
+            }
+        } else {
+            showNotification(data.error || 'Could not sync', 'error');
+        }
+    } catch (error) {
+        console.error('Sync availability error:', error);
+        showNotification('Error syncing player pool', 'error');
+    }
+}
+
+async function resetAuction() {
+    if (!confirm('Clear ALL bids and viewer history? Every player returns to the auction pool. Teams stay — only rosters are emptied.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/auction/reset', { method: 'POST' });
+        const data = await response.json();
+
+        if (response.ok) {
+            showNotification(data.message || 'Auction reset', 'success');
+            currentPlayer = null;
+            const searchEl = document.getElementById('player-search');
+            if (searchEl) searchEl.value = '';
+            document.getElementById('player-info').classList.add('hidden');
+            const banner = document.getElementById('player-sold-notice');
+            if (banner) {
+                banner.classList.add('hidden');
+                banner.textContent = '';
+            }
+            document.getElementById('player-placeholder').style.display = 'block';
+            document.getElementById('player-photo').innerHTML = '<div class="photo-placeholder">📷</div>';
+            await loadPlayers();
+            await loadTeams();
+            renderTeamsGrid();
+            loadTeamPlayers();
+        } else {
+            showNotification(data.error || 'Could not reset auction', 'error');
+        }
+    } catch (error) {
+        console.error('Reset auction error:', error);
+        showNotification('Error resetting auction', 'error');
     }
 }

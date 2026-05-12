@@ -74,9 +74,19 @@ async function loadTeams() {
         teams.forEach(team => {
             const budgetUsed = team.total_spent;
             const budgetPercentage = (budgetUsed / team.budget) * 100;
+            const logoHtml = team.logo_url
+                ? `<img src="${team.logo_url}" alt="${team.name} logo" class="team-logo-img">`
+                : `<div class="team-logo-placeholder">🏏</div>`;
 
             const teamCard = `
                 <div class="team-card">
+                    <div class="team-logo-row">
+                        <div class="team-logo-wrap">${logoHtml}</div>
+                        <div>
+                            <input type="file" id="team-logo-input-${team.id}" class="hidden-file-input" accept="image/*" onchange="uploadTeamLogo(${team.id}, this)">
+                            <button class="btn btn-primary btn-sm" onclick="triggerTeamLogoUpload(${team.id})">Update Logo</button>
+                        </div>
+                    </div>
                     <h3>${team.name}</h3>
                     <div class="team-stat">
                         <label>Total Budget:</label>
@@ -116,7 +126,10 @@ async function loadTeams() {
 }
 
 async function createTeam() {
-    const name = document.getElementById('team-name').value.trim();
+    const nameEl = document.getElementById('team-name');
+    const ownerEl = document.getElementById('team-owner');
+    const name = (nameEl && nameEl.value) ? nameEl.value.trim() : '';
+    const owner = (ownerEl && ownerEl.value) ? ownerEl.value.trim() : '';
 
     if (!name) {
         alert('Please enter a team name');
@@ -127,11 +140,12 @@ async function createTeam() {
         const response = await fetch('/api/teams', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name })
+            body: JSON.stringify({ name, owner: owner || 'N/A' })
         });
 
         if (response.ok) {
-            document.getElementById('team-name').value = '';
+            if (nameEl) nameEl.value = '';
+            if (ownerEl) ownerEl.value = '';
             showFeedback('Team created successfully!', 'success', 'teams');
             loadTeams();
             loadDashboard();
@@ -206,14 +220,15 @@ function updateTeamDropdown(teams) {
 // ===== PLAYERS =====
 async function loadPlayers() {
     try {
-        const response = await fetch('/api/players?available=true');
+        const response = await fetch('/api/players');
         const players = await response.json();
+        players.sort((a, b) => a.serial_number - b.serial_number);
 
         const container = document.getElementById('players-list');
         container.innerHTML = '';
 
         if (players.length === 0) {
-            container.innerHTML = '<p style="grid-column: 1/-1; text-align: center;">No available players. Import from Excel first!</p>';
+            container.innerHTML = '<p style="grid-column: 1/-1; text-align: center;">No players found. Add a player above or run <code>sync_players_from_ppt.py</code> / <code>add_players_to_db.py</code>.</p>';
             return;
         }
 
@@ -231,6 +246,10 @@ async function loadPlayers() {
                         <div class="player-serial">#${player.serial_number}</div>
                         <div class="player-name">${player.name}</div>
                         <div class="player-role">${player.role}</div>
+                        <div class="player-actions">
+                            <input type="file" id="player-photo-input-${player.id}" class="hidden-file-input" accept="image/*" onchange="uploadPlayerPhoto(${player.id}, this)">
+                            <button class="btn btn-primary btn-sm" onclick="triggerPlayerPhotoUpload(${player.id})">Update Photo</button>
+                        </div>
                     </div>
                 </div>
             `;
@@ -244,46 +263,60 @@ async function loadPlayers() {
     }
 }
 
-async function importPlayers() {
-    const fileInput = document.getElementById('excel-file');
-    const file = fileInput.files[0];
+async function addPlayerManual() {
+    const serialEl = document.getElementById('player-serial');
+    const nameEl = document.getElementById('player-add-name');
+    const roleEl = document.getElementById('player-add-role');
 
-    if (!file) {
-        showFeedback('Please select an Excel file', 'error', 'players');
+    const serial = serialEl && serialEl.value !== '' ? parseInt(serialEl.value, 10) : NaN;
+    const name = nameEl ? nameEl.value.trim() : '';
+    const role = roleEl ? roleEl.value.trim() : '';
+
+    if (!Number.isInteger(serial) || serial < 1) {
+        showFeedback('Enter a valid serial number (whole number ≥ 1).', 'error', 'players');
         return;
     }
-
-    const formData = new FormData();
-    formData.append('file', file);
+    if (!name) {
+        showFeedback('Enter the player name.', 'error', 'players');
+        return;
+    }
 
     try {
         const response = await fetch('/api/players', {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                serial_number: serial,
+                name,
+                role: role || 'Unknown'
+            })
         });
 
-        const result = await response.json();
+        const result = await parseJsonResponse(response);
 
         if (response.ok) {
             showFeedback(`✓ ${result.message}`, 'success', 'players');
-            fileInput.value = '';
+            if (nameEl) nameEl.value = '';
+            if (roleEl) roleEl.value = '';
+            if (serialEl) serialEl.value = '';
             loadPlayers();
             loadDashboard();
         } else {
-            showFeedback(result.error || 'Error importing players', 'error', 'players');
+            showFeedback(result.error || 'Could not add player', 'error', 'players');
         }
     } catch (error) {
         console.error('Error:', error);
-        showFeedback('Error importing players', 'error', 'players');
+        showFeedback(error.message || 'Error adding player', 'error', 'players');
     }
 }
 
 function updatePlayerDropdown(players) {
     const select = document.getElementById('auction-player');
     const currentValue = select.value;
+    const sortedPlayers = [...players].sort((a, b) => a.serial_number - b.serial_number);
 
     select.innerHTML = '<option value="">-- Select Player --</option>';
-    players.forEach(player => {
+    sortedPlayers.forEach(player => {
         select.innerHTML += `<option value="${player.id}">${player.name} (${player.role})</option>`;
     });
 
@@ -363,6 +396,77 @@ function showFeedback(message, type, container) {
     if (feedback) {
         feedback.textContent = message;
         feedback.className = `feedback ${type}`;
+    }
+}
+
+async function parseJsonResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+        return response.json();
+    }
+
+    const text = await response.text();
+    const shortText = text ? text.slice(0, 120) : 'No response body';
+    throw new Error(`Server returned non-JSON response (${response.status}): ${shortText}`);
+}
+
+function triggerTeamLogoUpload(teamId) {
+    const input = document.getElementById(`team-logo-input-${teamId}`);
+    if (input) input.click();
+}
+
+async function uploadTeamLogo(teamId, inputEl) {
+    const file = inputEl.files && inputEl.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const response = await fetch(`/api/teams/${teamId}/logo`, {
+            method: 'POST',
+            body: formData
+        });
+        const result = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(result.error || 'Failed to upload logo');
+
+        showFeedback('Team logo updated successfully', 'success', 'teams');
+        loadTeams();
+    } catch (error) {
+        console.error('Error uploading team logo:', error);
+        showFeedback(error.message || 'Error uploading team logo', 'error', 'teams');
+    } finally {
+        inputEl.value = '';
+    }
+}
+
+function triggerPlayerPhotoUpload(playerId) {
+    const input = document.getElementById(`player-photo-input-${playerId}`);
+    if (input) input.click();
+}
+
+async function uploadPlayerPhoto(playerId, inputEl) {
+    const file = inputEl.files && inputEl.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const response = await fetch(`/api/players/${playerId}/photo`, {
+            method: 'POST',
+            body: formData
+        });
+        const result = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(result.error || 'Failed to upload photo');
+
+        showFeedback('Player photo updated successfully', 'success', 'players');
+        loadPlayers();
+    } catch (error) {
+        console.error('Error uploading player photo:', error);
+        showFeedback(error.message || 'Error uploading player photo', 'error', 'players');
+    } finally {
+        inputEl.value = '';
     }
 }
 

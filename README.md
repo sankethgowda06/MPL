@@ -11,7 +11,7 @@ A complete web application to manage cricket league player auctions with team bu
 - View team rosters
 
 ✅ **Player Auction**
-- Import players from Excel (with serial number, name, role, and photos)
+- Add players in the app or sync from PPT / `extracted_players.json` scripts (SQLite-backed)
 - Auction players to teams with bidding (minimum 1000 points)
 - Auto-deduct budget when players are added
 - Players automatically removed from available list
@@ -42,11 +42,8 @@ The app will be available at `http://localhost:5000`
 
 ### 3. Initial Setup
 
-**Step 1: Import Players**
-- Go to "Players" tab
-- Click "Import Players from Excel"
-- Select your `Player_List.xlsx` file
-- All 46 players will be imported with their roles
+**Step 1: Add players**
+- Use the "Players" tab (Add New Player), or run `sync_players_from_ppt.py` / `add_players_to_db.py` to load from PPT-derived JSON into SQLite
 
 **Step 2: Create Teams**
 - Go to "Teams" tab
@@ -66,7 +63,7 @@ The app will be available at `http://localhost:5000`
 **Step 4: Monitor & Export**
 - Check "Dashboard" for league overview
 - View team rosters by clicking "View Roster"
-- Export final data with "Download Excel Report"
+- Export snapshot with "Download JSON backup"
 
 ## File Structure
 
@@ -97,17 +94,8 @@ MPL/app/
 - Can be removed from team to make available again
 
 ### Data Export
-- Download complete league data as Excel
-- Includes team summaries, rosters, and available players
-- Use for reports and analysis
-
-## Default Players
-
-The Excel file includes 46 cricket players with:
-- **Serial Number**: 1-46
-- **Player Names**: DILEEP, RAGHU, THEJAS, SHARATH, etc.
-- **Roles**: ALL-ROUNDER, BATSMAN
-- **Photos**: Embedded in Excel and extracted to `player_photos/` folder
+- Download a JSON backup (teams, rosters, available players)
+- PDF roster report remains available via the app (`/api/export/team-report-pdf`)
 
 ## Database
 

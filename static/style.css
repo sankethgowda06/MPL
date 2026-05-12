@@ -209,6 +209,15 @@ body {
     font-size: 1.2em;
 }
 
+.btn-sm {
+    padding: 7px 12px;
+    font-size: 0.85em;
+}
+
+.hidden-file-input {
+    display: none;
+}
+
 /* Teams Grid */
 .teams-grid {
     display: grid;
@@ -228,6 +237,35 @@ body {
     color: var(--primary);
     margin-bottom: 15px;
     font-size: 1.4em;
+}
+
+.team-logo-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.team-logo-wrap {
+    width: 64px;
+    height: 64px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #eef2ff;
+    border: 1px solid #dbe2f3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.team-logo-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.team-logo-placeholder {
+    font-size: 1.8em;
 }
 
 .team-stat {
@@ -308,6 +346,10 @@ body {
 
 .player-info {
     padding: 15px;
+}
+
+.player-actions {
+    margin-top: 10px;
 }
 
 .player-name {
