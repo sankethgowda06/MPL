@@ -18,9 +18,19 @@
     </header>
 
     <main class="page">
-        <section>
+        <div class="tabs-container">
+            <button id="tab-teams" class="tab-btn active" data-tab="teams">Teams</button>
+            <button id="tab-players" class="tab-btn" data-tab="players">Players List</button>
+        </div>
+
+        <section id="section-teams" class="tab-content active">
             <h2>Teams</h2>
             <div id="teams-grid" class="teams-grid"></div>
+        </section>
+
+        <section id="section-players" class="tab-content">
+            <h2>All Players</h2>
+            <div id="players-grid" class="players-grid"></div>
         </section>
     </main>
 

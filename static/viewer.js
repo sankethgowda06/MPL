@@ -1,4 +1,5 @@
 const teamsGrid = document.getElementById("teams-grid");
+const playersGrid = document.getElementById("players-grid");
 const modal = document.getElementById("team-modal");
 const closeModalBtn = document.getElementById("close-modal");
 const modalTeamName = document.getElementById("modal-team-name");
@@ -9,6 +10,21 @@ const lastUpdated = document.getElementById("last-updated");
 
 let selectedTeamId = null;
 
+// Tab switching
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+        const tabName = btn.dataset.tab;
+        
+        // Update active tab button
+        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        
+        // Update visible content
+        document.querySelectorAll(".tab-content").forEach((section) => section.classList.remove("active"));
+        document.getElementById(`section-${tabName}`).classList.add("active");
+    });
+});
+
 async function fetchTeams() {
     const response = await fetch("/api/viewer/teams");
     if (!response.ok) throw new Error("Failed to fetch teams");
@@ -18,6 +34,12 @@ async function fetchTeams() {
 async function fetchTeamDetail(teamId) {
     const response = await fetch(`/api/viewer/teams/${teamId}`);
     if (!response.ok) throw new Error("Failed to fetch team detail");
+    return response.json();
+}
+
+async function fetchAllPlayers() {
+    const response = await fetch("/api/viewer/players");
+    if (!response.ok) throw new Error("Failed to fetch players");
     return response.json();
 }
 
@@ -66,6 +88,38 @@ function renderTeams(teams) {
     document.querySelectorAll(".team-card").forEach((card) => {
         card.addEventListener("click", () => openTeamModal(Number(card.dataset.teamId)));
     });
+}
+
+function renderPlayersList(players) {
+    if (!players.length) {
+        playersGrid.innerHTML = `<div class="empty">No players available.</div>`;
+        return;
+    }
+
+    playersGrid.innerHTML = players
+        .map(
+            (player) => `
+        <article class="player-list-card">
+            <div class="player-photo-wrap">
+                ${
+                    player.photo_url
+                        ? `<img src="${player.photo_url}" alt="${player.name}">`
+                        : `<div class="empty">No Photo</div>`
+                }
+            </div>
+            <div class="player-list-info">
+                <p class="player-name">#${player.serial_number} ${player.name}</p>
+                <p class="player-role">${player.role}</p>
+                ${
+                    player.team_name
+                        ? `<p class="player-team"><strong>${player.team_name}</strong> • ${formatMoney(player.price)}</p>`
+                        : `<p class="player-team">Not Bidded</p>`
+                }
+            </div>
+        </article>
+    `
+        )
+        .join("");
 }
 
 function renderPlayers(players) {
@@ -142,6 +196,11 @@ async function refresh() {
     try {
         const teams = await fetchTeams();
         renderTeams(teams);
+        
+        // Also refresh players list
+        const players = await fetchAllPlayers();
+        renderPlayersList(players);
+        
         lastUpdated.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
 
         if (selectedTeamId) {

@@ -718,6 +718,30 @@ def viewer_teams():
     return jsonify(data)
 
 
+@app.route('/api/viewer/players')
+def viewer_players():
+    """All players for the public viewer: roster status and bid price when sold."""
+    players_list = Player.query.order_by(Player.serial_number.asc()).all()
+    data = []
+    for p in players_list:
+        base = p.to_dict()
+        item = {
+            'id': base['id'],
+            'serial_number': base['serial_number'],
+            'name': base['name'],
+            'role': base['role'],
+            'photo_url': base.get('photo_url'),
+            'team_name': None,
+            'price': None,
+        }
+        auctioned = AuctionedPlayer.query.filter_by(player_id=p.id).first()
+        if auctioned and auctioned.team:
+            item['team_name'] = auctioned.team.name
+            item['price'] = auctioned.price
+        data.append(item)
+    return jsonify(data)
+
+
 @app.route('/api/viewer/teams/<int:team_id>')
 def viewer_team_detail(team_id):
     team = Team.query.get_or_404(team_id)
