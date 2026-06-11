@@ -5,6 +5,7 @@ from flask_migrate import Migrate
 from datetime import datetime
 import os
 import json
+import shutil
 from io import BytesIO
 from werkzeug.utils import secure_filename
 from reportlab.lib.pagesizes import A4
@@ -19,6 +20,11 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['PLAYER_PHOTOS_FOLDER'] = os.path.join(app.static_folder, 'player_photos')
 app.config['TEAM_LOGOS_FOLDER'] = os.path.join(app.static_folder, 'team_logos')
 app.config['REPORTS_FOLDER'] = 'reports'
+
+# Hybrid Sync Configuration
+app.config['SYNC_REMOTE_URL'] = os.environ.get('SYNC_REMOTE_URL') # e.g. https://your-app.pythonanywhere.com/api/remote-update
+app.config['SYNC_SECRET_KEY'] = os.environ.get('SYNC_SECRET_KEY', 'mpl-default-secret')
+app.config['IS_REMOTE_VIEWER'] = os.environ.get('IS_REMOTE_VIEWER', 'false').lower() == 'true'
 
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 
@@ -386,10 +392,14 @@ def build_team_players_pdf(output_path):
 
 @app.route('/')
 def index():
+    if app.config['IS_REMOTE_VIEWER']:
+        return render_template('viewer.html')
     return render_template('index.html')
 
 @app.route('/bidding')
 def bidding():
+    if app.config['IS_REMOTE_VIEWER']:
+        return "Admin access disabled on this server.", 403
     return render_template('bidding.html')
 
 @app.route('/viewer')
@@ -399,6 +409,8 @@ def viewer():
 @app.route('/api/teams', methods=['GET', 'POST'])
 def teams():
     if request.method == 'POST':
+        if app.config['IS_REMOTE_VIEWER']:
+            return jsonify({'error': 'Admin only'}), 403
         data = request.get_json(silent=True) or {}
         team_name = (data.get('name') or '').strip()
         team_owner = (data.get('owner') or '').strip()
@@ -427,6 +439,8 @@ def team_detail(team_id):
     team = Team.query.get_or_404(team_id)
     
     if request.method == 'DELETE':
+        if app.config['IS_REMOTE_VIEWER']:
+            return jsonify({'error': 'Admin only'}), 403
         remove_all_team_logos(team.id)
         TeamLog.query.filter_by(team_id=team.id).delete(synchronize_session=False)
         db.session.delete(team)
@@ -441,6 +455,8 @@ def team_detail(team_id):
 
 @app.route('/api/teams/<int:team_id>/logo', methods=['POST'])
 def upload_team_logo(team_id):
+    if app.config['IS_REMOTE_VIEWER']:
+        return jsonify({'error': 'Admin only'}), 403
     team = Team.query.get_or_404(team_id)
     file = request.files.get('file')
     if not file or not file.filename:
@@ -465,6 +481,99 @@ def upload_team_logo(team_id):
     }), 200
 
 
+# Sync Helper
+def sync_to_remote(action, data):
+    """Pushes an update to the remote viewer if configured."""
+    remote_url = app.config.get('SYNC_REMOTE_URL')
+    if not remote_url or app.config['IS_REMOTE_VIEWER']:
+        return
+
+    try:
+        payload = {
+            'secret_key': app.config['SYNC_SECRET_KEY'],
+            'action': action,
+            'data': data
+        }
+        # Timeout 5s to avoid blocking local app if remote is slow
+        requests.post(remote_url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Cloud Sync failed: {e}")
+
+
+@app.route('/api/remote-update', methods=['POST'])
+def remote_update():
+    """Receiver endpoint on PythonAnywhere to update its DB from Local."""
+    data = request.get_json(silent=True) or {}
+    secret = data.get('secret_key')
+    
+    if secret != app.config['SYNC_SECRET_KEY']:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    action = data.get('action')
+    payload = data.get('data')
+    
+    try:
+        if action == 'AUCTION_RESET':
+            TeamLog.query.delete()
+            AuctionedPlayer.query.delete()
+            for player in Player.query.all():
+                player.is_available = True
+            db.session.commit()
+            
+        elif action == 'PLAYER_SYNC':
+            # Simplified sync: just overwrite/add players
+            for p_data in payload:
+                player = Player.query.get(p_data['id'])
+                if not player:
+                    player = Player(id=p_data['id'])
+                    db.session.add(player)
+                
+                player.serial_number = p_data.get('serial_number')
+                player.name = p_data.get('name')
+                player.role = p_data.get('role')
+                player.photo_path = p_data.get('photo_path')
+                player.is_available = p_data.get('is_available', True)
+            db.session.commit()
+
+        elif action == 'AUCTION_BID':
+            team_id = payload.get('team_id')
+            player_id = payload.get('player_id')
+            price = payload.get('price')
+            
+            player = Player.query.get(player_id)
+            if player:
+                # Remove if already exists
+                AuctionedPlayer.query.filter_by(player_id=player_id).delete()
+                
+                auctioned = AuctionedPlayer(
+                    team_id=team_id,
+                    player_id=player_id,
+                    price=price
+                )
+                player.is_available = False
+                db.session.add(auctioned)
+                add_team_log(team_id, player, 'BIDDED', price)
+                db.session.commit()
+
+        elif action == 'AUCTION_REMOVE':
+            player_id = payload.get('player_id')
+            team_id = payload.get('team_id')
+            price = payload.get('price')
+            
+            auctioned = AuctionedPlayer.query.filter_by(player_id=player_id).first()
+            if auctioned:
+                player = auctioned.player_ref
+                player.is_available = True
+                add_team_log(team_id, player, 'REMOVED', price)
+                db.session.delete(auctioned)
+                db.session.commit()
+
+        return jsonify({'status': 'success'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
 def download_player_photo(url, player_id):
     """Download photo from URL and save locally using gdown."""
     if not url or not url.startswith('http'):
@@ -483,10 +592,13 @@ def download_player_photo(url, player_id):
         download_url = f"https://drive.google.com/uc?id={drive_id}"
     
     try:
+        # Use shutil.which to find gdown or default to gdown in PATH
+        gdown_path = shutil.which('gdown') or "gdown"
+        
         # Use gdown to download the file (handles Drive links automatically)
         # --quiet keeps logs clean
         cmd = [
-            "/home/sankethgowda06/.local/bin/gdown",
+            gdown_path,
             "--quiet",
             "-O", save_path,
             download_url
@@ -511,6 +623,8 @@ def download_player_photo(url, player_id):
 
 @app.route('/api/sync-sheet', methods=['POST'])
 def sync_sheet():
+    if app.config['IS_REMOTE_VIEWER']:
+        return jsonify({'error': 'Admin only'}), 403
     data = request.get_json(silent=True)
     if not data or 'url' not in data:
         return jsonify({'error': 'Sheet URL is required'}), 400
@@ -597,6 +711,11 @@ def sync_sheet():
                 added += 1
                 
         db.session.commit()
+        
+        # Hybrid Sync: Sync all players to remote
+        all_players = [p.to_dict() for p in Player.query.all()]
+        sync_to_remote('PLAYER_SYNC', all_players)
+        
         return jsonify({'message': f'Synced {added + updated} players ({added} added, {updated} updated).'}), 200
 
         
@@ -607,6 +726,8 @@ def sync_sheet():
 @app.route('/api/players', methods=['GET', 'POST'])
 def players():
     if request.method == 'POST':
+        if app.config['IS_REMOTE_VIEWER']:
+            return jsonify({'error': 'Admin only'}), 403
         data = request.get_json(silent=True)
         if isinstance(data, dict):
             if data and 'serial_number' not in data and ('name' in data or 'role' in data):
@@ -657,6 +778,8 @@ def player_detail(player_id):
     player = Player.query.get_or_404(player_id)
     
     if request.method == 'DELETE':
+        if app.config['IS_REMOTE_VIEWER']:
+            return jsonify({'error': 'Admin only'}), 403
         AuctionedPlayer.query.filter_by(player_id=player.id).delete(synchronize_session=False)
         TeamLog.query.filter_by(player_id=player.id).delete(synchronize_session=False)
         db.session.delete(player)
@@ -668,6 +791,8 @@ def player_detail(player_id):
 
 @app.route('/api/players/<int:player_id>/photo', methods=['POST'])
 def upload_player_photo(player_id):
+    if app.config['IS_REMOTE_VIEWER']:
+        return jsonify({'error': 'Admin only'}), 403
     player = Player.query.get_or_404(player_id)
     file = request.files.get('file')
     if not file or not file.filename:
@@ -694,12 +819,12 @@ def upload_player_photo(player_id):
 
 @app.route('/api/auction', methods=['POST'])
 def auction():
+    if app.config['IS_REMOTE_VIEWER']:
+        return jsonify({'error': 'Admin only'}), 403
     data = request.json
     team_id = data.get('team_id')
     player_id = data.get('player_id')
     price = data.get('price', 1000)
-
-    cleanup_orphan_bid_data()
 
     team = Team.query.get_or_404(team_id)
     player = Player.query.get_or_404(player_id)
@@ -735,14 +860,14 @@ def auction():
     add_team_log(team_id, player, 'BIDDED', price)
     db.session.commit()
 
-    # Generate updated PDF report after every successful bid
-    reports_dir = app.config['REPORTS_FOLDER']
-    ensure_dir(reports_dir)
-    report_path = os.path.join(reports_dir, 'team_players_latest.pdf')
-    try:
-        build_team_players_pdf(report_path)
-    except Exception as pdf_error:
-        print(f"PDF generation error: {pdf_error}")
+    # Performance: Removed synchronous PDF building. It's now on-demand in /api/export/team-report-pdf
+    
+    # Hybrid Sync: Update remote viewer
+    sync_to_remote('AUCTION_BID', {
+        'team_id': team_id,
+        'player_id': player_id,
+        'price': price
+    })
     
     return jsonify({
         'message': f'{player.name} added to {team.name} for {price} points',
@@ -789,6 +914,8 @@ def sync_auction_availability():
 
 @app.route('/api/auction/reset', methods=['POST'])
 def reset_auction_state():
+    if app.config['IS_REMOTE_VIEWER']:
+        return jsonify({'error': 'Admin only'}), 403
     """Remove all auction assignments, clear bid logs, and return every player to the pool."""
     TeamLog.query.delete()
     AuctionedPlayer.query.delete()
@@ -796,13 +923,8 @@ def reset_auction_state():
         player.is_available = True
     db.session.commit()
 
-    reports_dir = app.config['REPORTS_FOLDER']
-    ensure_dir(reports_dir)
-    report_path = os.path.join(reports_dir, 'team_players_latest.pdf')
-    try:
-        build_team_players_pdf(report_path)
-    except Exception as pdf_error:
-        print(f"PDF generation error after auction reset: {pdf_error}")
+    # Hybrid Sync
+    sync_to_remote('AUCTION_RESET', {})
 
     return jsonify({
         'message': 'Auction cleared: all bids removed and every player is available again.',
@@ -826,6 +948,13 @@ def remove_player_from_team(team_id, player_id):
     add_team_log(team_id, player, 'REMOVED', price)
     db.session.delete(auctioned)
     db.session.commit()
+    
+    # Hybrid Sync
+    sync_to_remote('AUCTION_REMOVE', {
+        'player_id': player_id,
+        'team_id': team_id,
+        'price': price
+    })
     
     return jsonify({'message': f'{player.name} removed from team. Budget refunded!'}), 200
 
