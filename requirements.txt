@@ -5,3 +5,4 @@ Werkzeug==3.0.1
 reportlab
 gunicorn
 Flask-Migrate
+requests
