@@ -1,0 +1,18 @@
+# Docker ignore file
+__pycache__/
+*.py[cod]
+*$py.class
+.git/
+.gitignore
+.venv/
+.env
+.dockerignore
+Dockerfile
+README.md
+*.pptx
+*.xlsx
+extracted_players.json
+reports/
+team_logos/
+player_photos/
+# instance/ # Don't ignore instance if we want to bundle the initial DB

@@ -218,6 +218,46 @@ function updateTeamDropdown(teams) {
 }
 
 // ===== PLAYERS =====
+async function syncFromSheet() {
+    const urlEl = document.getElementById('sheet-url');
+    const syncBtn = document.getElementById('sync-btn');
+    const progressEl = document.getElementById('sync-progress');
+    
+    const url = urlEl ? urlEl.value.trim() : '';
+    if (!url) {
+        showFeedback('Please enter a Google Sheet URL.', 'error', 'players');
+        return;
+    }
+
+    syncBtn.disabled = true;
+    progressEl.style.display = 'block';
+
+    try {
+        const response = await fetch('/api/sync-sheet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            showFeedback(`✓ ${result.message}`, 'success', 'players');
+            urlEl.value = '';
+            loadPlayers();
+            loadDashboard();
+        } else {
+            showFeedback(result.error || 'Sync failed', 'error', 'players');
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showFeedback('Connection error during sync.', 'error', 'players');
+    } finally {
+        syncBtn.disabled = false;
+        progressEl.style.display = 'none';
+    }
+}
+
 async function loadPlayers() {
     try {
         const response = await fetch('/api/players');
@@ -268,10 +308,12 @@ async function addPlayerManual() {
     const serialEl = document.getElementById('player-serial');
     const nameEl = document.getElementById('player-add-name');
     const roleEl = document.getElementById('player-add-role');
+    const photoEl = document.getElementById('player-add-photo');
 
     const serial = serialEl && serialEl.value !== '' ? parseInt(serialEl.value, 10) : NaN;
     const name = nameEl ? nameEl.value.trim() : '';
     const role = roleEl ? roleEl.value.trim() : '';
+    const photo = photoEl ? photoEl.value.trim() : '';
 
     if (!Number.isInteger(serial) || serial < 1) {
         showFeedback('Enter a valid serial number (whole number ≥ 1).', 'error', 'players');
@@ -289,7 +331,8 @@ async function addPlayerManual() {
             body: JSON.stringify({
                 serial_number: serial,
                 name,
-                role: role || 'Unknown'
+                role: role || 'Unknown',
+                photo_path: photo || null
             })
         });
 

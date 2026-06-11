@@ -139,8 +139,10 @@ function renderPlayers(players) {
                         : `<div class="empty">No Photo</div>`
                 }
             </div>
-            <p class="player-name">#${player.serial_number} ${player.name}</p>
-            <p class="player-meta">${player.role} • ${formatMoney(player.price)}</p>
+            <div class="player-info">
+                <p class="player-name">#${player.serial_number} ${player.name}</p>
+                <p class="player-meta">${player.role} • ${formatMoney(player.price)}</p>
+            </div>
         </article>
     `
         )

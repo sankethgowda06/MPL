@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
+import requests
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from datetime import datetime
@@ -74,8 +75,12 @@ class Player(db.Model):
         photo_url = None
         photo_filename = None
         if self.photo_path:
-            photo_filename = os.path.basename(self.photo_path)
-            photo_url = player_photo_public_url(photo_filename)
+            if self.photo_path.startswith('http'):
+                photo_url = player_photo_public_url(self.photo_path)
+                photo_filename = self.photo_path # Keep full URL as filename if it is one
+            else:
+                photo_filename = os.path.basename(self.photo_path)
+                photo_url = player_photo_public_url(photo_filename)
         
         return {
             'id': self.id,
@@ -184,6 +189,20 @@ def team_logo_public_url(logo_filename):
 def player_photo_public_url(photo_path):
     if not photo_path:
         return None
+    if photo_path.startswith('http'):
+        # Format for browser-direct Google Drive images
+        if 'drive.google.com' in photo_path:
+            drive_id = None
+            if 'id=' in photo_path:
+                drive_id = photo_path.split('id=')[-1].split('&')[0]
+            elif '/file/d/' in photo_path:
+                drive_id = photo_path.split('/file/d/')[1].split('/')[0]
+            
+            if drive_id:
+                # This format works best for displaying Drive images in a browser
+                return f"https://lh3.googleusercontent.com/u/0/d/{drive_id}"
+        return photo_path
+    
     photo_filename = os.path.basename(photo_path)
     return f"{app.static_url_path.rstrip('/')}/player_photos/{photo_filename}"
 
@@ -446,6 +465,145 @@ def upload_team_logo(team_id):
     }), 200
 
 
+def download_player_photo(url, player_id):
+    """Download photo from URL and save locally using gdown."""
+    if not url or not url.startswith('http'):
+        return None
+        
+    import subprocess
+    
+    # We'll use .jpg as default
+    filename = f"player_sync_{player_id}.jpg"
+    save_path = os.path.join(app.config['PLAYER_PHOTOS_FOLDER'], filename)
+    
+    # Try to convert drive.google.com/open?id= to drive.google.com/uc?id= for better gdown compatibility
+    download_url = url
+    if 'drive.google.com' in url and 'id=' in url:
+        drive_id = url.split('id=')[-1].split('&')[0]
+        download_url = f"https://drive.google.com/uc?id={drive_id}"
+    
+    try:
+        # Use gdown to download the file (handles Drive links automatically)
+        # --quiet keeps logs clean
+        cmd = [
+            "/home/sankethgowda06/.local/bin/gdown",
+            "--quiet",
+            "-O", save_path,
+            download_url
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        
+        if result.returncode == 0 and os.path.exists(save_path):
+            # Check if it's actually an image
+            from PIL import Image
+            try:
+                with Image.open(save_path) as img:
+                    img.verify()
+                return filename
+            except:
+                # Not a valid image, delete it
+                if os.path.exists(save_path):
+                    os.remove(save_path)
+    except Exception as e:
+        print(f"Failed to download photo for player {player_id}: {e}")
+    return None
+
+
+@app.route('/api/sync-sheet', methods=['POST'])
+def sync_sheet():
+    data = request.get_json(silent=True)
+    if not data or 'url' not in data:
+        return jsonify({'error': 'Sheet URL is required'}), 400
+    
+    sheet_url = data['url']
+    
+    # Basic validation and conversion for CSV export
+    if 'docs.google.com/spreadsheets' not in sheet_url:
+        return jsonify({'error': 'Invalid Google Sheet URL'}), 400
+        
+    try:
+        # Extract Spreadsheet ID
+        if '/d/' in sheet_url:
+            sheet_id = sheet_url.split('/d/')[1].split('/')[0]
+        else:
+            return jsonify({'error': 'Could not extract Spreadsheet ID'}), 400
+            
+        # Export as CSV (assumes first sheet)
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+        response = requests.get(csv_url, timeout=15)
+        if response.status_code != 200:
+            return jsonify({'error': 'Could not access the sheet. Make sure it is public.'}), 400
+            
+        import csv
+        from io import StringIO
+        
+        f = StringIO(response.text)
+        reader = csv.DictReader(f)
+        
+        # Determine columns
+        fieldnames = reader.fieldnames
+        if not fieldnames:
+             return jsonify({'error': 'Empty sheet'}), 400
+             
+        name_col = next((f for f in fieldnames if 'name' in f.lower()), None)
+        role_col = next((f for f in fieldnames if 'role' in f.lower()), None)
+        photo_col = next((f for f in fieldnames if 'photo' in f.lower() or 'image' in f.lower()), None)
+        
+        if not name_col:
+            return jsonify({'error': 'Could not find a "Name" column'}), 400
+
+        added = 0
+        updated = 0
+        
+        for idx, row in enumerate(reader, start=1):
+            name = (row.get(name_col) or '').strip()
+            if not name: continue
+            
+            role = (row.get(role_col) or 'Unknown').strip()
+            photo_url = (row.get(photo_col) or '').strip()
+            
+            serial = idx
+            
+            player = Player.query.filter_by(name=name).first()
+            if player:
+                player.role = role
+                # Only download if photo_path changed or is URL
+                if photo_url and (player.photo_path != photo_url):
+                    local_photo = download_player_photo(photo_url, player.id)
+                    if local_photo:
+                        player.photo_path = local_photo
+                    else:
+                        # Fallback to URL if download failed
+                        player.photo_path = photo_url
+                updated += 1
+            else:
+                player = Player(
+                    serial_number=serial,
+                    name=name,
+                    role=role,
+                    is_available=True
+                )
+                db.session.add(player)
+                db.session.flush() # Get ID
+                
+                if photo_url:
+                    local_photo = download_player_photo(photo_url, player.id)
+                    if local_photo:
+                        player.photo_path = local_photo
+                    else:
+                        # Fallback to URL if download failed
+                        player.photo_path = photo_url
+                
+                added += 1
+                
+        db.session.commit()
+        return jsonify({'message': f'Synced {added + updated} players ({added} added, {updated} updated).'}), 200
+
+        
+    except Exception as e:
+        print(f"Sync error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/players', methods=['GET', 'POST'])
 def players():
     if request.method == 'POST':
@@ -475,6 +633,7 @@ def players():
                     serial_number=serial,
                     name=name,
                     role=role,
+                    photo_path=data.get('photo_path'),
                     is_available=True
                 )
                 db.session.add(player)
@@ -840,28 +999,10 @@ def export_team_report_pdf():
 
 
 @app.before_request
-def add_predefined_teams():
-    if not hasattr(app, 'predefined_teams_added'):
+def setup_db():
+    if not hasattr(app, 'db_initialized'):
         db.create_all()
-        print("Adding predefined teams...")
-        predefined_teams = [
-            {"name": "subbi friends", "owner": "pushpak"},
-            {"name": "RCB boys", "owner": "bharath"},
-            {"name": "avi boys", "owner": "anvesh"},
-            {"name": "coconut boys", "owner": "anil"},
-            {"name": "nethravathi enterprises", "owner": "chethan"}
-        ]
-
-        for team in predefined_teams:
-            print(f"Checking team: {team['name']}")
-            if not Team.query.filter_by(name=team['name']).first():
-                print(f"Adding team: {team['name']}")
-                db.session.add(Team(name=team['name'], owner=team['owner']))
-            else:
-                print(f"Team already exists: {team['name']}")
-        db.session.commit()
-        print("Predefined teams added.")
-        app.predefined_teams_added = True
+        app.db_initialized = True
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=False)

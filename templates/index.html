@@ -122,6 +122,21 @@
             <div id="players-feedback" class="feedback"></div>
 
             <div class="section">
+                <h2>Sync from Google Sheet</h2>
+                <p style="margin-bottom: 12px; color: #475569;">Paste the Google Sheet URL to import players. The sheet must be publicly accessible.</p>
+                <div class="form-group" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
+                    <div style="flex: 1; min-width: 250px;">
+                        <label for="sheet-url" style="display: block; font-size: 0.85rem; margin-bottom: 4px;">Google Sheet URL</label>
+                        <input type="text" id="sheet-url" placeholder="https://docs.google.com/spreadsheets/d/..." class="input" style="width: 100%;">
+                    </div>
+                    <button type="button" onclick="syncFromSheet()" id="sync-btn" class="btn btn-primary">Sync Players</button>
+                </div>
+                <div id="sync-progress" style="margin-top: 10px; font-size: 0.9rem; display: none;">
+                    Syncing... please wait.
+                </div>
+            </div>
+
+            <div class="section">
                 <h2>Add New Player</h2>
                 <p style="margin-bottom: 12px; color: #475569;">Use a unique jersey / list number as serial. Photos can be uploaded after the player appears below.</p>
                 <div class="form-group" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
@@ -137,7 +152,12 @@
                         <label for="player-add-role" style="display: block; font-size: 0.85rem; margin-bottom: 4px;">Role</label>
                         <input type="text" id="player-add-role" placeholder="e.g. Batsman" class="input" style="width: 100%;">
                     </div>
+                    <div style="flex: 1; min-width: 160px;">
+                        <label for="player-add-photo" style="display: block; font-size: 0.85rem; margin-bottom: 4px;">Photo URL (Optional)</label>
+                        <input type="text" id="player-add-photo" placeholder="e.g. Drive Link" class="input" style="width: 100%;">
+                    </div>
                     <button type="button" onclick="addPlayerManual()" class="btn btn-success">Add Player</button>
+
                 </div>
             </div>
 
