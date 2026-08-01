@@ -3,12 +3,150 @@ let allPlayers = [];
 let allTeams = [];
 let currentPlayer = null;
 let currentTeam = null;
+let isPresentationMode = true;
+let lastSoldInfo = null;
+let lastBidReportUrl = null;
+let isSubmittingBid = false;
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', () => {
+    applyPresentationMode(false);
     loadPlayers();
     loadTeams();
+    const searchInput = document.getElementById('player-search');
+    if (searchInput) {
+        searchInput.focus();
+    }
 });
+
+function applyPresentationMode(enabled) {
+    isPresentationMode = enabled;
+    document.body.classList.toggle('presentation-mode', enabled);
+    const btn = document.getElementById('presentation-toggle');
+    if (btn) {
+        btn.textContent = enabled ? 'Stage Mode: ON' : 'Stage Mode: OFF';
+    }
+}
+
+function togglePresentationMode() {
+    applyPresentationMode(!isPresentationMode);
+}
+
+function updateStageStrip() {
+    const currentPlayerEl = document.getElementById('stage-current-player');
+    const currentTeamEl = document.getElementById('stage-current-team');
+    const lastSoldEl = document.getElementById('stage-last-sold');
+
+    if (currentPlayerEl) {
+        currentPlayerEl.textContent = currentPlayer
+            ? `Now showing: #${currentPlayer.serial_number} ${currentPlayer.name} (${currentPlayer.role})`
+            : 'No player selected';
+    }
+
+    if (currentTeamEl) {
+        currentTeamEl.textContent = currentTeam
+            ? `Bidding Team: ${currentTeam.name}`
+            : 'Waiting for bid';
+    }
+
+    if (lastSoldEl) {
+        lastSoldEl.textContent = lastSoldInfo
+            ? `Last sold: ${lastSoldInfo.player} -> ${lastSoldInfo.team} (₹${Number(lastSoldInfo.price).toLocaleString()})`
+            : 'Last sold: -';
+    }
+}
+
+function runSoldAnimation(playerName, teamName, price, teamId) {
+    const photoBox = document.getElementById('player-photo');
+    const overlay = document.getElementById('sold-overlay');
+    const soldTeamName = document.getElementById('sold-team-name');
+    const soldPrice = document.getElementById('sold-price');
+
+    if (soldTeamName) soldTeamName.textContent = `${playerName} to ${teamName}`;
+    if (soldPrice) soldPrice.textContent = `₹${Number(price).toLocaleString()}`;
+
+    if (photoBox) {
+        photoBox.classList.remove('bid-flash');
+        // reflow to restart animation
+        void photoBox.offsetWidth;
+        photoBox.classList.add('bid-flash');
+    }
+
+    const winnerCard = document.querySelector(`.team-compact-card[data-team-id="${teamId}"]`);
+    if (winnerCard) {
+        winnerCard.classList.remove('bid-winner');
+        void winnerCard.offsetWidth;
+        winnerCard.classList.add('bid-winner');
+    }
+
+    if (overlay) {
+        overlay.classList.remove('hidden');
+        setTimeout(() => {
+            overlay.classList.add('hidden');
+        }, 1800);
+    }
+
+    setTimeout(() => {
+        if (winnerCard) winnerCard.classList.remove('bid-winner');
+        if (photoBox) photoBox.classList.remove('bid-flash');
+    }, 2000);
+}
+
+function renderPlayerPhoto(player) {
+    const photoBox = document.getElementById('player-photo');
+    if (!photoBox) return;
+
+    const photoMarkup = player && player.photo_url
+        ? `<img src="${player.photo_url}" alt="${player.name}">`
+        : '<div class="photo-placeholder">📷</div>';
+
+    photoBox.innerHTML = `
+        ${photoMarkup}
+        <div id="sold-overlay" class="sold-overlay hidden">
+            <div class="sold-stamp">SOLD</div>
+            <div id="sold-team-name" class="sold-team-name"></div>
+            <div id="sold-price" class="sold-price"></div>
+        </div>
+    `;
+}
+
+function getSaleInfoForPlayer(playerId) {
+    for (const team of allTeams) {
+        if (!team.players || !Array.isArray(team.players)) {
+            continue;
+        }
+
+        const soldEntry = team.players.find(p => Number(p.id) === Number(playerId));
+        if (soldEntry) {
+            return {
+                teamName: team.name,
+                price: soldEntry.price
+            };
+        }
+    }
+
+    return null;
+}
+
+function showSoldOverlayOnPhoto(playerName, saleInfo) {
+    const overlay = document.getElementById('sold-overlay');
+    const soldTeamName = document.getElementById('sold-team-name');
+    const soldPrice = document.getElementById('sold-price');
+
+    if (!overlay || !soldTeamName || !soldPrice) {
+        return;
+    }
+
+    if (saleInfo && saleInfo.teamName) {
+        soldTeamName.textContent = `${playerName} to ${saleInfo.teamName}`;
+        soldPrice.textContent = saleInfo.price ? `₹${Number(saleInfo.price).toLocaleString()}` : 'Already Sold';
+    } else {
+        soldTeamName.textContent = playerName;
+        soldPrice.textContent = 'Already Sold';
+    }
+
+    overlay.classList.remove('hidden');
+}
 
 // Full player list so search by jersey # works even for already-auctioned players
 async function loadPlayers() {
@@ -60,15 +198,17 @@ async function searchPlayer() {
         if (bannerMiss) bannerMiss.classList.add('hidden');
         document.getElementById('player-info').classList.add('hidden');
         document.getElementById('player-placeholder').style.display = 'block';
-        document.getElementById('player-photo').innerHTML = '<div class="photo-placeholder">📷</div>';
+        renderPlayerPhoto(null);
         currentPlayer = null;
         renderTeamsGrid();
+        updateStageStrip();
         return;
     }
 
     currentPlayer = player;
     displayPlayerDetails();
     renderTeamsGrid();
+    updateStageStrip();
 }
 
 // Fetch player by serial number (legacy - kept for backward compatibility)
@@ -99,10 +239,12 @@ function displayPlayerDetails() {
     document.getElementById('player-placeholder').style.display = 'none';
 
     // Show player photo
-    if (currentPlayer.photo_url) {
-        document.getElementById('player-photo').innerHTML = `<img src="${currentPlayer.photo_url}" alt="${currentPlayer.name}">`;
-    } else {
-        document.getElementById('player-photo').innerHTML = '<div class="photo-placeholder">📷</div>';
+    renderPlayerPhoto(currentPlayer);
+
+    // If this player is already sold, keep SOLD overlay visible on photo.
+    if (currentPlayer.is_available === false) {
+        const saleInfo = getSaleInfoForPlayer(currentPlayer.id);
+        showSoldOverlayOnPhoto(currentPlayer.name, saleInfo);
     }
 }
 
@@ -112,13 +254,14 @@ function renderTeamsGrid() {
     teamsGrid.innerHTML = '';
 
     allTeams.forEach(team => {
+        const teamNameSafe = (team.name || '').replace(/'/g, "\\'");
         const budgetUsed = team.total_spent;
         const budgetRemaining = team.budget - budgetUsed;
         const canBid = currentPlayer && currentPlayer.is_available !== false && budgetRemaining >= 1000;
         const budgetCritical = budgetRemaining < 10000;
 
         const teamCard = `
-            <div class="team-compact-card ${!canBid ? 'disabled' : ''}" ${canBid ? `onclick="openBidModal(${team.id}, '${team.name}', ${budgetRemaining})"` : ''}>
+            <div class="team-compact-card ${!canBid ? 'disabled' : ''}" data-team-id="${team.id}" ${canBid ? `onclick="openBidModal(${team.id}, '${teamNameSafe}', ${budgetRemaining})"` : ''}>
                 <div class="team-name-compact">
                     ${team.name}
                     <span class="team-owner-badge">${team.owner}</span>
@@ -143,7 +286,7 @@ function renderTeamsGrid() {
                 </div>
 
                 ${canBid ? `
-                    <button class="bid-btn-compact" onclick="openBidModal(${team.id}, '${team.name}', ${budgetRemaining})">
+                    <button class="bid-btn-compact" onclick="openBidModal(${team.id}, '${teamNameSafe}', ${budgetRemaining})">
                         💰 Bid ${(budgetRemaining / 1000).toFixed(0)}K max
                     </button>
                 ` : `
@@ -166,6 +309,7 @@ function openBidModal(teamId, teamName, budgetRemaining) {
     }
 
     currentTeam = allTeams.find(t => t.id === teamId);
+    updateStageStrip();
 
     document.getElementById('bid-player-name').textContent = currentPlayer.name;
     document.getElementById('bid-team-name').textContent = teamName;
@@ -180,8 +324,33 @@ function openBidModal(teamId, teamName, budgetRemaining) {
 
 // Close bid modal
 function closeBidModal() {
+    if (isSubmittingBid) {
+        return;
+    }
+
     document.getElementById('bid-modal').classList.add('hidden');
     document.getElementById('bid-error').classList.add('hidden');
+}
+
+function setBidSubmittingState(submitting) {
+    isSubmittingBid = submitting;
+
+    const confirmButton = document.getElementById('confirm-bid-btn');
+    const cancelButton = document.getElementById('cancel-bid-btn');
+    const bidAmountInput = document.getElementById('bid-amount');
+
+    if (confirmButton) {
+        confirmButton.disabled = submitting;
+        confirmButton.textContent = submitting ? 'Processing...' : '✓ Confirm Bid';
+    }
+
+    if (cancelButton) {
+        cancelButton.disabled = submitting;
+    }
+
+    if (bidAmountInput) {
+        bidAmountInput.disabled = submitting;
+    }
 }
 
 // Handle Enter key on search
@@ -191,8 +360,45 @@ function handleEnter(event) {
     }
 }
 
+function triggerPdfDownload(url) {
+    if (!url) {
+        return;
+    }
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+}
+
+function updateReportButtons() {
+    const lastBidBtn = document.getElementById('download-last-bid-btn');
+    if (lastBidBtn) {
+        lastBidBtn.disabled = !lastBidReportUrl;
+    }
+}
+
+function downloadLastBidReport() {
+    if (!lastBidReportUrl) {
+        showNotification('No completed bid report available yet', 'error');
+        return;
+    }
+
+    triggerPdfDownload(lastBidReportUrl);
+}
+
+function downloadTeamReport() {
+    triggerPdfDownload('/api/export/team-report-pdf');
+}
+
 // Confirm bid
 async function confirmBid() {
+    if (isSubmittingBid) {
+        return;
+    }
+
     if (!currentPlayer || !currentTeam) {
         showNotification('Error: Invalid selection', 'error');
         return;
@@ -215,6 +421,9 @@ async function confirmBid() {
         return;
     }
 
+    setBidSubmittingState(true);
+    errorDiv.classList.add('hidden');
+
     try {
         const response = await fetch('/api/auction', {
             method: 'POST',
@@ -231,8 +440,25 @@ async function confirmBid() {
         const data = await response.json();
 
         if (response.ok) {
-            closeBidModal();
-            showNotification(`✓ ${currentPlayer.name} sold to ${currentTeam.name} for ₹${bidAmount.toLocaleString()}!`, 'success');
+            document.getElementById('bid-modal').classList.add('hidden');
+            lastBidReportUrl = data.bid_report_pdf_url || null;
+            updateReportButtons();
+
+            currentPlayer.is_available = false;
+            currentTeam.total_spent = (currentTeam.total_spent || 0) + bidAmount;
+            currentTeam.players_count = (currentTeam.players_count || 0) + 1;
+
+            lastSoldInfo = {
+                player: currentPlayer.name,
+                team: currentTeam.name,
+                price: bidAmount,
+            };
+
+            renderTeamsGrid();
+            displayPlayerDetails();
+            runSoldAnimation(currentPlayer.name, currentTeam.name, bidAmount, currentTeam.id);
+            updateStageStrip();
+            showNotification(`✓ ${currentPlayer.name} sold to ${currentTeam.name} for ₹${bidAmount.toLocaleString()}! Report ready in Last Bid PDF.`, 'success');
 
             // Refresh data after 1 second
             setTimeout(() => {
@@ -242,8 +468,10 @@ async function confirmBid() {
                 if (searchEl) searchEl.value = '';
                 document.getElementById('player-info').classList.add('hidden');
                 document.getElementById('player-placeholder').style.display = 'block';
-                document.getElementById('player-photo').innerHTML = '<div class="photo-placeholder">📷</div>';
+                renderPlayerPhoto(null);
                 currentPlayer = null;
+                currentTeam = null;
+                updateStageStrip();
             }, 1000);
         } else {
             errorDiv.textContent = data.error || 'Error processing bid';
@@ -253,6 +481,8 @@ async function confirmBid() {
         console.error('Error confirming bid:', error);
         errorDiv.textContent = 'Error processing bid. Please try again.';
         errorDiv.classList.remove('hidden');
+    } finally {
+        setBidSubmittingState(false);
     }
 }
 
@@ -439,11 +669,13 @@ async function resetAuction() {
                 banner.textContent = '';
             }
             document.getElementById('player-placeholder').style.display = 'block';
-            document.getElementById('player-photo').innerHTML = '<div class="photo-placeholder">📷</div>';
+            renderPlayerPhoto(null);
             await loadPlayers();
             await loadTeams();
             renderTeamsGrid();
             loadTeamPlayers();
+            currentTeam = null;
+            updateStageStrip();
         } else {
             showNotification(data.error || 'Could not reset auction', 'error');
         }

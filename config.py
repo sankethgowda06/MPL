@@ -1,0 +1,3 @@
+CLOUD_API_URL = ""
+SYNC_ENABLED = True
+API_KEY = ""

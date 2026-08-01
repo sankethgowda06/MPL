@@ -110,6 +110,31 @@ body {
     margin-bottom: 30px;
 }
 
+.insights-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.stat-card.compact {
+    padding: 18px;
+}
+
+.stat-card.compact .stat-value {
+    font-size: 1.35em;
+}
+
+.subheading {
+    color: var(--dark);
+    margin: 4px 0 10px;
+    font-size: 1.05em;
+}
+
+.insight-role-table-wrap {
+    margin-top: 8px;
+}
+
 .stat-card {
     background: white;
     padding: 25px;
@@ -304,6 +329,13 @@ body {
     gap: 20px;
 }
 
+.player-toolbar {
+    display: grid;
+    grid-template-columns: 1fr 220px;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
 .player-card {
     background: white;
     border-radius: 10px;
@@ -482,6 +514,10 @@ body {
 
     .teams-grid,
     .players-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .player-toolbar {
         grid-template-columns: 1fr;
     }
 

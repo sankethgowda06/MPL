@@ -1,15 +1,23 @@
-from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
+﻿from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from datetime import datetime
 import os
 import json
+import csv
+import re
+import mimetypes
 from io import BytesIO
+from urllib.parse import urlparse, parse_qs
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 from werkzeug.utils import secure_filename
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
+from sqlalchemy.exc import OperationalError, IntegrityError
+import time
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///mpl_league.db'
@@ -20,6 +28,7 @@ app.config['TEAM_LOGOS_FOLDER'] = os.path.join(app.static_folder, 'team_logos')
 app.config['REPORTS_FOLDER'] = 'reports'
 
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
+PHOTO_DOWNLOAD_TIMEOUT_SECONDS = 6
 
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
@@ -197,6 +206,281 @@ def resolve_player_photo_path(photo_path):
     return os.path.join(app.config['PLAYER_PHOTOS_FOLDER'], photo_filename)
 
 
+def clear_all_player_photos():
+    photos_dir = app.config['PLAYER_PHOTOS_FOLDER']
+    ensure_dir(photos_dir)
+    removed = 0
+    for name in os.listdir(photos_dir):
+        path = os.path.join(photos_dir, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError:
+                continue
+    return removed
+
+
+def normalize_header_name(value):
+    cleaned = re.sub(r'[^a-z0-9]+', ' ', (value or '').strip().lower())
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+
+def find_matching_column(headers_map, candidates):
+    for candidate in candidates:
+        if candidate in headers_map:
+            return headers_map[candidate]
+    for normalized_header, original_header in headers_map.items():
+        for candidate in candidates:
+            if candidate in normalized_header:
+                return original_header
+    return None
+
+
+def google_sheet_csv_url(sheet_url):
+    parsed = urlparse((sheet_url or '').strip())
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError('Provide a valid Google Sheet URL.')
+
+    host = parsed.netloc.lower()
+    if 'docs.google.com' not in host:
+        raise ValueError('Only Google Sheet links are supported.')
+
+    path = parsed.path
+    query = parse_qs(parsed.query)
+
+    # If user already provided CSV export URL, use it directly.
+    if path.endswith('/export') and query.get('format', [''])[0].lower() == 'csv':
+        return sheet_url
+
+    match = re.search(r'/spreadsheets/d/([a-zA-Z0-9-_]+)', path)
+    if not match:
+        raise ValueError('Could not detect Google Sheet ID from URL.')
+
+    sheet_id = match.group(1)
+    gid = query.get('gid', [None])[0]
+
+    if not gid and parsed.fragment:
+        fragment_qs = parse_qs(parsed.fragment.replace('#', ''))
+        gid = fragment_qs.get('gid', [None])[0]
+        if not gid:
+            gid_match = re.search(r'gid=([0-9]+)', parsed.fragment)
+            if gid_match:
+                gid = gid_match.group(1)
+
+    if gid:
+        return f'https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}'
+    return f'https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv'
+
+
+def parse_google_drive_file_id(url):
+    parsed = urlparse((url or '').strip())
+    if not parsed.netloc:
+        return None
+
+    query = parse_qs(parsed.query)
+    if 'id' in query and query['id']:
+        return query['id'][0]
+
+    match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', parsed.path)
+    if match:
+        return match.group(1)
+    return None
+
+
+def resolve_photo_download_url(photo_url):
+    parsed = urlparse((photo_url or '').strip())
+    host = parsed.netloc.lower()
+    if 'drive.google.com' in host:
+        file_id = parse_google_drive_file_id(photo_url)
+        if file_id:
+            return f'https://drive.google.com/uc?export=download&id={file_id}'
+    return photo_url
+
+
+def download_player_photo(photo_url, serial):
+    if not photo_url:
+        return None
+
+    source_url = resolve_photo_download_url(photo_url)
+    req = Request(source_url, headers={'User-Agent': 'Mozilla/5.0'})
+
+    try:
+        with urlopen(req, timeout=PHOTO_DOWNLOAD_TIMEOUT_SECONDS) as resp:
+            content_type = (resp.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+            payload = resp.read(3 * 1024 * 1024 + 1)  # Cap at ~3MB
+    except Exception:
+        return None
+
+    if len(payload) == 0 or len(payload) > 3 * 1024 * 1024:
+        return None
+
+    ext = None
+    if content_type:
+        guessed = mimetypes.guess_extension(content_type) or ''
+        ext = guessed.replace('.', '').lower() if guessed else None
+
+    if not ext:
+        parsed = urlparse(source_url)
+        basename = os.path.basename(parsed.path)
+        if '.' in basename:
+            ext = basename.rsplit('.', 1)[1].lower()
+
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        return None
+
+    filename = f'player_{serial}.{ext}'
+    save_path = os.path.join(app.config['PLAYER_PHOTOS_FOLDER'], filename)
+    with open(save_path, 'wb') as f:
+        f.write(payload)
+    return filename
+
+
+def import_players_from_google_sheet(sheet_url, include_photos=True):
+    csv_url = google_sheet_csv_url(sheet_url)
+    req = Request(csv_url, headers={'User-Agent': 'Mozilla/5.0'})
+
+    try:
+        with urlopen(req, timeout=20) as resp:
+            content = resp.read().decode('utf-8-sig', errors='replace')
+    except (HTTPError, URLError) as exc:
+        raise ValueError(f'Failed to fetch sheet data: {exc}')
+
+    rows = list(csv.DictReader(content.splitlines()))
+    if not rows:
+        return {
+            'imported': 0,
+            'skipped': 0,
+            'photos_saved': 0,
+            'csv_url': csv_url,
+        }
+
+    headers_map = {normalize_header_name(k): k for k in (rows[0].keys() if rows[0] else [])}
+    name_col = find_matching_column(headers_map, ['player name', 'name'])
+    role_col = find_matching_column(headers_map, ['player role', 'role'])
+    photo_col = find_matching_column(headers_map, ['player photo', 'photo'])
+
+    if not name_col:
+        raise ValueError('Could not find "Player name" column in the sheet.')
+
+    existing_keys = {
+        ((p.name or '').strip().lower(), (p.role or '').strip().lower())
+        for p in Player.query.all()
+    }
+    existing_players = {
+        ((p.name or '').strip().lower(), (p.role or '').strip().lower()): p
+        for p in Player.query.all()
+    }
+    used_serials = {
+        p.serial_number
+        for p in Player.query.all()
+        if isinstance(p.serial_number, int) and p.serial_number > 0
+    }
+
+    imported = 0
+    skipped = 0
+    photos_saved = 0
+
+    def commit_with_retry(max_attempts=4, base_delay=0.3):
+        for attempt in range(max_attempts):
+            try:
+                db.session.commit()
+                return
+            except OperationalError as exc:
+                db.session.rollback()
+                is_locked = 'database is locked' in str(exc).lower()
+                if is_locked and attempt < max_attempts - 1:
+                    time.sleep(base_delay * (attempt + 1))
+                    continue
+                raise
+
+    def allocate_next_serial():
+        serial = 1
+        while serial in used_serials:
+            serial += 1
+        used_serials.add(serial)
+        return serial
+
+    for row in rows:
+        name = (row.get(name_col) or '').strip()
+        role = (row.get(role_col) or '').strip() if role_col else ''
+        photo_url = (row.get(photo_col) or '').strip() if photo_col else ''
+
+        if not name:
+            skipped += 1
+            continue
+
+        role = role or 'Unknown'
+        dedupe_key = (name.lower(), role.lower())
+        if dedupe_key in existing_keys:
+            if include_photos and photo_url:
+                existing_player = existing_players.get(dedupe_key)
+                if existing_player and not existing_player.photo_path and existing_player.serial_number:
+                    photo_filename = download_player_photo(photo_url, existing_player.serial_number)
+                    if photo_filename:
+                        existing_player.photo_path = photo_filename
+                        try:
+                            commit_with_retry()
+                            photos_saved += 1
+                        except Exception:
+                            db.session.rollback()
+            skipped += 1
+            continue
+
+        serial = allocate_next_serial()
+        player = Player(
+            serial_number=serial,
+            name=name,
+            role=role,
+            is_available=True,
+        )
+
+        photo_filename = None
+        if include_photos and photo_url:
+            photo_filename = download_player_photo(photo_url, serial)
+            if photo_filename:
+                player.photo_path = photo_filename
+
+        db.session.add(player)
+        try:
+            commit_with_retry()
+            existing_keys.add(dedupe_key)
+            existing_players[dedupe_key] = player
+            imported += 1
+            if photo_filename:
+                photos_saved += 1
+        except IntegrityError:
+            db.session.rollback()
+            skipped += 1
+            if photo_filename:
+                photo_path = os.path.join(app.config['PLAYER_PHOTOS_FOLDER'], photo_filename)
+                if os.path.exists(photo_path):
+                    os.remove(photo_path)
+        except OperationalError as exc:
+            db.session.rollback()
+            skipped += 1
+            if photo_filename:
+                photo_path = os.path.join(app.config['PLAYER_PHOTOS_FOLDER'], photo_filename)
+                if os.path.exists(photo_path):
+                    os.remove(photo_path)
+            print(f'Import row skipped due to DB error: {exc}')
+        except Exception:
+            db.session.rollback()
+            skipped += 1
+            if photo_filename:
+                photo_path = os.path.join(app.config['PLAYER_PHOTOS_FOLDER'], photo_filename)
+                if os.path.exists(photo_path):
+                    os.remove(photo_path)
+            print(f'Import row skipped due to unexpected error for player: {name}')
+
+    return {
+        'imported': imported,
+        'skipped': skipped,
+        'photos_saved': photos_saved,
+        'csv_url': csv_url,
+    }
+
+
 # Ensure static upload folders exist on app startup.
 ensure_dir(app.config['PLAYER_PHOTOS_FOLDER'])
 ensure_dir(app.config['TEAM_LOGOS_FOLDER'])
@@ -237,6 +521,45 @@ def reconcile_player_availability():
     return fixed
 
 
+def next_available_player_serial():
+    """Return the smallest available positive serial (fills gaps after deletes)."""
+    serial_rows = db.session.query(Player.serial_number).filter(Player.serial_number.isnot(None)).order_by(Player.serial_number.asc()).all()
+    expected = 1
+    for row in serial_rows:
+        serial = row[0]
+        if serial is None:
+            continue
+        if serial < expected:
+            continue
+        if serial > expected:
+            return expected
+        expected += 1
+    return expected
+
+
+def compact_player_serial_numbers():
+    """Reassign serial numbers to a continuous 1..N sequence."""
+    players = Player.query.order_by(Player.serial_number.asc(), Player.id.asc()).all()
+    if not players:
+        return 0
+
+    # Two-pass update avoids unique collisions while renumbering.
+    temp_base = 1_000_000
+    changed = 0
+    for idx, player in enumerate(players, start=1):
+        temp_serial = temp_base + idx
+        if player.serial_number != temp_serial:
+            player.serial_number = temp_serial
+            changed += 1
+    db.session.commit()
+
+    for idx, player in enumerate(players, start=1):
+        if player.serial_number != idx:
+            player.serial_number = idx
+    db.session.commit()
+    return changed
+
+
 def add_team_log(team_id, player, action, price):
     log = TeamLog(
         team_id=team_id,
@@ -250,63 +573,127 @@ def add_team_log(team_id, player, action, price):
     db.session.add(log)
 
 
+def fit_pdf_text(pdf, text, font_name, font_size, max_width):
+    value = str(text or '')
+    if pdf.stringWidth(value, font_name, font_size) <= max_width:
+        return value
+
+    suffix = '...'
+    while value:
+        value = value[:-1]
+        candidate = value.rstrip() + suffix
+        if pdf.stringWidth(candidate, font_name, font_size) <= max_width:
+            return candidate
+    return suffix
+
+
+def bid_report_cache_dir():
+    reports_dir = app.config['REPORTS_FOLDER']
+    ensure_dir(reports_dir)
+    bid_dir = os.path.join(reports_dir, 'bid_reports')
+    ensure_dir(bid_dir)
+    return bid_dir
+
+
+def bid_report_cache_path(auctioned):
+    safe_player = secure_filename(auctioned.player_ref.name or 'player')
+    safe_team = secure_filename(auctioned.team.name or 'team')
+    filename = f'bid_{auctioned.id}_{safe_player}_{safe_team}.pdf'
+    return os.path.join(bid_report_cache_dir(), filename)
+
+
+def save_bid_receipt_pdf(auctioned, output_path=None):
+    path = output_path or bid_report_cache_path(auctioned)
+    pdf_stream = build_bid_receipt_pdf(auctioned)
+    with open(path, 'wb') as handle:
+        handle.write(pdf_stream.getvalue())
+    return path
+
+
 def build_team_players_pdf(output_path):
     teams = Team.query.order_by(Team.name.asc()).all()
     page_width, page_height = A4
     pdf = canvas.Canvas(output_path, pagesize=A4)
 
     margin_x = 24
-    y = page_height - 24
     content_width = page_width - (2 * margin_x)
 
     card_w = content_width
-    card_h = 90
-    photo_w = 52
-    photo_h = 68
-    row_h = card_h + 8
+    card_h = 108
+    photo_w = 72
+    photo_h = 90
+    row_gap = 10
+
+    def draw_page_header():
+        y_top = page_height - 24
+        header_h = 38
+        pdf.setFillColor(colors.HexColor("#0F172A"))
+        pdf.roundRect(margin_x, y_top - header_h, content_width, header_h, 10, stroke=0, fill=1)
+
+        pdf.setFillColor(colors.white)
+        pdf.setFont("Helvetica-Bold", 15)
+        pdf.drawString(margin_x + 12, y_top - 16, "MPL Team Player Report")
+        pdf.setFont("Helvetica", 8.8)
+        pdf.drawRightString(
+            margin_x + content_width - 12,
+            y_top - 16,
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        return y_top - header_h - 10
+
+    def draw_team_header(team_name, owner_name, players_count, spent_amount, remaining_amount, continued=False):
+        bar_h = 26
+        subtitle_h = 18
+        section_h = bar_h + subtitle_h
+        section_y = y - section_h
+
+        pdf.setFillColor(colors.HexColor("#1E3A8A"))
+        pdf.roundRect(margin_x, section_y + subtitle_h, content_width, bar_h, 7, stroke=0, fill=1)
+
+        pdf.setFillColor(colors.white)
+        pdf.setFont("Helvetica-Bold", 11)
+        team_title = f"TEAM: {team_name.upper()}"
+        if continued:
+            team_title += " (CONT.)"
+        pdf.drawString(margin_x + 10, section_y + subtitle_h + 9, fit_pdf_text(pdf, team_title, 'Helvetica-Bold', 11, content_width * 0.58))
+
+        stats_text = f"Players: {players_count}   Spent: Rs. {spent_amount:,}   Left: Rs. {remaining_amount:,}"
+        pdf.setFont("Helvetica", 9)
+        pdf.drawRightString(margin_x + content_width - 10, section_y + subtitle_h + 9, fit_pdf_text(pdf, stats_text, 'Helvetica', 9, content_width * 0.38))
+
+        pdf.setFillColor(colors.HexColor("#334155"))
+        pdf.setFont("Helvetica", 8.8)
+        owner_text = f"Owner: {owner_name or '-'}"
+        pdf.drawString(margin_x + 2, section_y + 5, fit_pdf_text(pdf, owner_text, 'Helvetica', 8.8, content_width - 4))
+
+        return section_y - 6
 
     pdf.setTitle("MPL Team Player List")
-    pdf.setFont("Helvetica-Bold", 15)
-    pdf.drawString(margin_x, y, "MPL Team Player List")
-    pdf.setFont("Helvetica", 9)
-    pdf.drawString(margin_x, y - 13, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    y -= 30
+    y = draw_page_header()
 
     for team in teams:
         team_players = sorted(team.players, key=lambda a: a.player_ref.serial_number or 0)
         spent = sum(p.price for p in team.players)
         remaining = team.budget - spent
 
-        if y < 90:
+        if y < 120:
             pdf.showPage()
-            y = page_height - 24
+            y = draw_page_header()
 
-        # Highlight team header bar
-        bar_h = 22
-        pdf.setFillColor(colors.HexColor("#1E3A8A"))
-        pdf.roundRect(margin_x, y - bar_h + 4, content_width, bar_h, 6, stroke=0, fill=1)
-        pdf.setFillColor(colors.white)
-        pdf.setFont("Helvetica-Bold", 11)
-        pdf.drawString(margin_x + 8, y - 9, f"TEAM: {team.name.upper()}")
-        pdf.setFont("Helvetica", 9)
-        pdf.drawRightString(margin_x + content_width - 8, y - 9, f"Players: {len(team_players)}  Remaining: ₹{remaining:,}")
-        pdf.setFillColor(colors.black)
-        y -= 24
-
-        pdf.setFont("Helvetica", 9)
-        pdf.drawString(margin_x, y, f"Owner: {team.owner}")
-        y -= 14
+        y = draw_team_header(team.name, team.owner, len(team_players), spent, remaining)
 
         if not team_players:
             pdf.setFont("Helvetica-Oblique", 9)
-            pdf.drawString(margin_x, y, "No players bidded yet.")
-            y -= 18
+            pdf.setFillColor(colors.HexColor("#64748B"))
+            pdf.drawString(margin_x + 4, y - 4, "No players bidded yet.")
+            y -= 22
             continue
 
         for auctioned in team_players:
-            if y < (row_h + 18):
+            if y < (card_h + 24):
                 pdf.showPage()
-                y = page_height - 24
+                y = draw_page_header()
+                y = draw_team_header(team.name, team.owner, len(team_players), spent, remaining, continued=True)
 
             card_x = margin_x
             card_y = y - card_h
@@ -316,12 +703,16 @@ def build_team_players_pdf(output_path):
             # Card background
             pdf.setFillColor(colors.HexColor("#F8FAFC"))
             pdf.setStrokeColor(colors.HexColor("#CBD5E1"))
-            pdf.roundRect(card_x, card_y, card_w, card_h, 8, stroke=1, fill=1)
+            pdf.roundRect(card_x, card_y, card_w, card_h, 10, stroke=1, fill=1)
             pdf.setFillColor(colors.black)
 
             # Photo block
-            photo_x = card_x + 10
+            photo_x = card_x + 12
             photo_y = card_y + (card_h - photo_h) / 2
+            pdf.setFillColor(colors.white)
+            pdf.setStrokeColor(colors.HexColor("#D1D9E6"))
+            pdf.roundRect(photo_x - 2, photo_y - 2, photo_w + 4, photo_h + 4, 6, stroke=1, fill=1)
+
             if photo_file_path and os.path.exists(photo_file_path):
                 try:
                     img = ImageReader(photo_file_path)
@@ -336,34 +727,184 @@ def build_team_players_pdf(output_path):
                     )
                 except Exception:
                     pdf.setStrokeColor(colors.HexColor("#94A3B8"))
-                    pdf.rect(photo_x, photo_y, photo_w, photo_h, stroke=1, fill=0)
-                    pdf.setFont("Helvetica", 7)
-                    pdf.drawString(photo_x + 10, photo_y + 28, "No")
-                    pdf.drawString(photo_x + 5, photo_y + 16, "Photo")
+                    pdf.roundRect(photo_x, photo_y, photo_w, photo_h, 4, stroke=1, fill=0)
+                    pdf.setFont("Helvetica", 8)
+                    pdf.setFillColor(colors.HexColor("#64748B"))
+                    pdf.drawCentredString(photo_x + (photo_w / 2), photo_y + (photo_h / 2), "No Photo")
             else:
                 pdf.setStrokeColor(colors.HexColor("#94A3B8"))
-                pdf.rect(photo_x, photo_y, photo_w, photo_h, stroke=1, fill=0)
-                pdf.setFont("Helvetica", 7)
-                pdf.drawString(photo_x + 10, photo_y + 28, "No")
-                pdf.drawString(photo_x + 5, photo_y + 16, "Photo")
+                pdf.roundRect(photo_x, photo_y, photo_w, photo_h, 4, stroke=1, fill=0)
+                pdf.setFont("Helvetica", 8)
+                pdf.setFillColor(colors.HexColor("#64748B"))
+                pdf.drawCentredString(photo_x + (photo_w / 2), photo_y + (photo_h / 2), "No Photo")
 
-            text_x = photo_x + photo_w + 12
-            text_y = card_y + card_h - 16
+            text_x = photo_x + photo_w + 16
+            text_width = card_w - (text_x - card_x) - 14
+            title_y = card_y + card_h - 20
+
             pdf.setFillColor(colors.HexColor("#0F172A"))
-            pdf.setFont("Helvetica-Bold", 11)
-            pdf.drawString(text_x, text_y, f"#{player.serial_number} {player.name}")
+            pdf.setFont("Helvetica-Bold", 12)
+            player_heading = fit_pdf_text(pdf, f"#{player.serial_number} {player.name}", 'Helvetica-Bold', 12, text_width)
+            pdf.drawString(text_x, title_y, player_heading)
 
-            pdf.setFont("Helvetica", 9)
+            # Role chip
+            role_chip = fit_pdf_text(pdf, player.role, 'Helvetica-Bold', 8.5, 160)
+            chip_w = min(max(pdf.stringWidth(role_chip, "Helvetica-Bold", 8.5) + 16, 58), 180)
+            chip_y = title_y - 18
+            pdf.setFillColor(colors.HexColor("#E2E8F0"))
+            pdf.roundRect(text_x, chip_y - 7, chip_w, 15, 5, stroke=0, fill=1)
             pdf.setFillColor(colors.HexColor("#334155"))
-            pdf.drawString(text_x, text_y - 15, f"Role: {player.role}")
-            pdf.drawString(text_x, text_y - 30, f"Bid Amount: ₹{auctioned.price:,}")
-            pdf.drawString(text_x, text_y - 45, f"Bought At: {auctioned.auctioned_at.strftime('%d-%m-%Y %I:%M %p')}")
+            pdf.setFont("Helvetica-Bold", 8.5)
+            pdf.drawString(text_x + 8, chip_y - 2, role_chip)
 
-            y -= row_h
+            row_label_w = 56
+            row_y = chip_y - 22
+            rows = [
+                ("Bid", f"Rs. {auctioned.price:,}"),
+                ("Time", auctioned.auctioned_at.strftime('%d-%m-%Y %I:%M %p')),
+            ]
+            pdf.setFont("Helvetica-Bold", 8.5)
+            for label, value in rows:
+                pdf.setFillColor(colors.HexColor("#64748B"))
+                pdf.drawString(text_x, row_y, f"{label}:")
+                pdf.setFillColor(colors.HexColor("#334155"))
+                pdf.setFont("Helvetica", 9)
+                safe_value = fit_pdf_text(pdf, value, 'Helvetica', 9, text_width - row_label_w)
+                pdf.drawString(text_x + row_label_w, row_y, safe_value)
+                pdf.setFont("Helvetica-Bold", 8.5)
+                row_y -= 16
 
-        y -= 10
+            y -= (card_h + row_gap)
+
+        y -= 8
 
     pdf.save()
+
+
+def build_bid_receipt_pdf(auctioned):
+    player = auctioned.player_ref
+    team = auctioned.team
+    page_width, page_height = A4
+    output = BytesIO()
+    pdf = canvas.Canvas(output, pagesize=A4)
+
+    pdf.setTitle(f"MPL Bid Report - {player.name}")
+
+    margin_x = 42
+    content_w = page_width - (margin_x * 2)
+    top_y = page_height - 48
+
+    pdf.setFillColor(colors.HexColor("#0F172A"))
+    pdf.roundRect(margin_x, top_y - 82, content_w, 82, 16, stroke=0, fill=1)
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", 23)
+    pdf.drawString(margin_x + 18, top_y - 30, "MPL Auction Bid Report")
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(margin_x + 18, top_y - 50, f"Generated: {datetime.now().strftime('%d-%m-%Y %I:%M %p')}")
+    pdf.setFillColor(colors.HexColor("#FBBF24"))
+    pdf.roundRect(margin_x + content_w - 110, top_y - 60, 92, 28, 10, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor("#111827"))
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawCentredString(margin_x + content_w - 64, top_y - 43, "SOLD")
+
+    card_y = top_y - 360
+    card_h = 250
+    pdf.setFillColor(colors.HexColor("#F8FAFC"))
+    pdf.setStrokeColor(colors.HexColor("#CBD5E1"))
+    pdf.roundRect(margin_x, card_y, content_w, card_h, 18, stroke=1, fill=1)
+
+    photo_x = margin_x + 20
+    photo_y = card_y + 22
+    photo_w = 175
+    photo_h = 205
+    photo_file_path = resolve_player_photo_path(player.photo_path)
+
+    pdf.setFillColor(colors.white)
+    pdf.roundRect(photo_x - 6, photo_y - 6, photo_w + 12, photo_h + 12, 12, stroke=0, fill=1)
+    pdf.setStrokeColor(colors.HexColor("#CBD5E1"))
+    pdf.roundRect(photo_x - 6, photo_y - 6, photo_w + 12, photo_h + 12, 12, stroke=1, fill=0)
+
+    if photo_file_path and os.path.exists(photo_file_path):
+        try:
+            img = ImageReader(photo_file_path)
+            pdf.drawImage(
+                img,
+                photo_x,
+                photo_y,
+                width=photo_w,
+                height=photo_h,
+                preserveAspectRatio=True,
+                anchor='c'
+            )
+        except Exception:
+            pdf.setStrokeColor(colors.HexColor("#94A3B8"))
+            pdf.roundRect(photo_x, photo_y, photo_w, photo_h, 8, stroke=1, fill=0)
+            pdf.setFont("Helvetica-Bold", 16)
+            pdf.setFillColor(colors.HexColor("#64748B"))
+            pdf.drawCentredString(photo_x + (photo_w / 2), photo_y + 90, "PLAYER PHOTO")
+    else:
+        pdf.setStrokeColor(colors.HexColor("#94A3B8"))
+        pdf.roundRect(photo_x, photo_y, photo_w, photo_h, 8, stroke=1, fill=0)
+        pdf.setFont("Helvetica-Bold", 16)
+        pdf.setFillColor(colors.HexColor("#64748B"))
+        pdf.drawCentredString(photo_x + (photo_w / 2), photo_y + 90, "PLAYER PHOTO")
+
+    detail_x = photo_x + photo_w + 34
+    detail_w = margin_x + content_w - detail_x - 20
+    text_top = card_y + card_h - 28
+    pdf.setFillColor(colors.HexColor("#0F172A"))
+    pdf.setFont("Helvetica-Bold", 22)
+    player_name = fit_pdf_text(pdf, player.name, 'Helvetica-Bold', 22, detail_w)
+    pdf.drawString(detail_x, text_top, player_name)
+
+    pdf.setFillColor(colors.HexColor("#DBEAFE"))
+    pdf.roundRect(detail_x, text_top - 36, min(detail_w, 170), 22, 8, stroke=0, fill=1)
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.setFillColor(colors.HexColor("#1D4ED8"))
+    team_name = fit_pdf_text(pdf, team.name, 'Helvetica-Bold', 12, min(detail_w, 156))
+    pdf.drawString(detail_x + 10, text_top - 22, team_name)
+
+    row_y = text_top - 64
+    row_h = 26
+    label_w = 88
+    rows = [
+        ("Serial Number", f"#{player.serial_number}"),
+        ("Role", player.role),
+        ("Owner", team.owner),
+        ("Time", auctioned.auctioned_at.strftime('%d-%m-%Y %I:%M %p')),
+    ]
+
+    for label, value in rows:
+        pdf.setFillColor(colors.white)
+        pdf.roundRect(detail_x, row_y - 16, detail_w, row_h, 8, stroke=0, fill=1)
+        pdf.setStrokeColor(colors.HexColor("#E2E8F0"))
+        pdf.roundRect(detail_x, row_y - 16, detail_w, row_h, 8, stroke=1, fill=0)
+        pdf.setFont("Helvetica-Bold", 10)
+        pdf.setFillColor(colors.HexColor("#64748B"))
+        pdf.drawString(detail_x + 10, row_y, label)
+        pdf.setFont("Helvetica", 10)
+        pdf.setFillColor(colors.HexColor("#0F172A"))
+        safe_value = fit_pdf_text(pdf, value, 'Helvetica', 10, detail_w - label_w - 18)
+        pdf.drawRightString(detail_x + detail_w - 10, row_y, safe_value)
+        row_y -= 34
+
+    pdf.setFillColor(colors.HexColor("#16A34A"))
+    pdf.roundRect(detail_x, card_y + 26, detail_w, 40, 12, stroke=0, fill=1)
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", 17)
+    pdf.drawCentredString(detail_x + (detail_w / 2), card_y + 41, f"Sold For: Rs. {auctioned.price:,}")
+
+    pdf.setFillColor(colors.HexColor("#7C2D12"))
+    pdf.setFont("Helvetica-Bold", 11)
+    pdf.drawString(margin_x, card_y - 28, f"Bid completed at {auctioned.auctioned_at.strftime('%d-%m-%Y %I:%M %p')}")
+
+    pdf.setFont("Helvetica", 10)
+    pdf.setFillColor(colors.HexColor("#475569"))
+    pdf.drawString(margin_x, card_y - 50, "This report was generated automatically after the completed auction action.")
+
+    pdf.save()
+    output.seek(0)
+    return output
 
 @app.route('/')
 def index():
@@ -449,39 +990,39 @@ def upload_team_logo(team_id):
 @app.route('/api/players', methods=['GET', 'POST'])
 def players():
     if request.method == 'POST':
-        data = request.get_json(silent=True)
-        if isinstance(data, dict):
-            if data and 'serial_number' not in data and ('name' in data or 'role' in data):
-                return jsonify({'error': 'serial_number is required in JSON body'}), 400
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'error': 'Send JSON body (Content-Type: application/json).'}), 400
 
-            name = (data.get('name') or '').strip()
-            role = (data.get('role') or '').strip() or 'Unknown'
+        name = (data.get('name') or '').strip()
+        role = (data.get('role') or '').strip() or 'Unknown'
+        if not name:
+            return jsonify({'error': 'name is required'}), 400
 
-            if 'serial_number' in data:
-                if not name:
-                    return jsonify({'error': 'name is required'}), 400
-                try:
-                    serial = int(data['serial_number'])
-                except (TypeError, ValueError):
-                    return jsonify({'error': 'serial_number must be an integer'}), 400
+        serial_raw = data.get('serial_number', None)
+        if serial_raw in (None, ''):
+            serial = next_available_player_serial()
+        else:
+            try:
+                serial = int(serial_raw)
+            except (TypeError, ValueError):
+                return jsonify({'error': 'serial_number must be an integer'}), 400
 
-                if serial < 1:
-                    return jsonify({'error': 'serial_number must be a positive integer'}), 400
+            if serial < 1:
+                return jsonify({'error': 'serial_number must be a positive integer'}), 400
 
-                if Player.query.filter_by(serial_number=serial).first():
-                    return jsonify({'error': f'Player with serial #{serial} already exists'}), 409
+            if Player.query.filter_by(serial_number=serial).first():
+                return jsonify({'error': f'Player with serial #{serial} already exists'}), 409
 
-                player = Player(
-                    serial_number=serial,
-                    name=name,
-                    role=role,
-                    is_available=True
-                )
-                db.session.add(player)
-                db.session.commit()
-                return jsonify({'message': 'Player added', 'player': player.to_dict()}), 201
-
-        return jsonify({'error': 'Send JSON with serial_number and name (Content-Type: application/json).'}), 400
+        player = Player(
+            serial_number=serial,
+            name=name,
+            role=role,
+            is_available=True
+        )
+        db.session.add(player)
+        db.session.commit()
+        return jsonify({'message': f'Player added as serial #{serial}', 'player': player.to_dict()}), 201
     
     # Get available players
     available_only = request.args.get('available', 'false').lower() == 'true'
@@ -502,6 +1043,7 @@ def player_detail(player_id):
         TeamLog.query.filter_by(player_id=player.id).delete(synchronize_session=False)
         db.session.delete(player)
         db.session.commit()
+        compact_player_serial_numbers()
         return '', 204
     
     return jsonify(player.to_dict())
@@ -530,6 +1072,49 @@ def upload_player_photo(player_id):
     return jsonify({
         'message': 'Player photo updated successfully',
         'player': player.to_dict()
+    }), 200
+
+
+@app.route('/api/players/import/google-sheet', methods=['POST'])
+def import_players_google_sheet():
+    data = request.get_json(silent=True) or {}
+    sheet_url = (data.get('sheet_url') or '').strip()
+    include_photos = bool(data.get('include_photos', True))
+
+    if not sheet_url:
+        return jsonify({'error': 'sheet_url is required'}), 400
+
+    try:
+        result = import_players_from_google_sheet(sheet_url, include_photos=include_photos)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception:
+        return jsonify({'error': 'Unexpected error during sheet import.'}), 500
+
+    return jsonify({
+        'message': f"Imported {result['imported']} player(s). Skipped {result['skipped']} duplicate/empty row(s).",
+        **result,
+    }), 200
+
+
+@app.route('/api/players/delete-all', methods=['POST'])
+def delete_all_players():
+    players_count = Player.query.count()
+    auctions_count = AuctionedPlayer.query.count()
+    logs_count = TeamLog.query.count()
+
+    AuctionedPlayer.query.delete(synchronize_session=False)
+    TeamLog.query.delete(synchronize_session=False)
+    Player.query.delete(synchronize_session=False)
+    photos_removed = clear_all_player_photos()
+    db.session.commit()
+
+    return jsonify({
+        'message': 'All players deleted successfully.',
+        'players_deleted': players_count,
+        'auctions_deleted': auctions_count,
+        'logs_deleted': logs_count,
+        'photos_deleted': photos_removed,
     }), 200
 
 
@@ -576,20 +1161,17 @@ def auction():
     add_team_log(team_id, player, 'BIDDED', price)
     db.session.commit()
 
-    # Generate updated PDF report after every successful bid
-    reports_dir = app.config['REPORTS_FOLDER']
-    ensure_dir(reports_dir)
-    report_path = os.path.join(reports_dir, 'team_players_latest.pdf')
     try:
-        build_team_players_pdf(report_path)
+        save_bid_receipt_pdf(auctioned)
     except Exception as pdf_error:
-        print(f"PDF generation error: {pdf_error}")
+        print(f"Bid PDF cache error: {pdf_error}")
     
     return jsonify({
         'message': f'{player.name} added to {team.name} for {price} points',
         'team': team.to_dict(),
         'auctioned_player': auctioned.to_dict(),
-        'team_report_pdf_url': '/api/export/team-report-pdf'
+        'team_report_pdf_url': '/api/export/team-report-pdf',
+        'bid_report_pdf_url': f'/api/export/bid-report/{auctioned.id}'
     }), 201
 
 
@@ -636,6 +1218,7 @@ def reset_auction_state():
     for player in Player.query.all():
         player.is_available = True
     db.session.commit()
+    SyncService.sync_dashboard()
 
     reports_dir = app.config['REPORTS_FOLDER']
     ensure_dir(reports_dir)
@@ -693,6 +1276,68 @@ def dashboard():
         'available_players': available_players,
         'auctioned_players': auctioned_players,
         'teams': teams_data
+    })
+
+
+@app.route('/api/insights')
+def insights():
+    teams = Team.query.all()
+    players = Player.query.all()
+    auction_rows = AuctionedPlayer.query.all()
+
+    total_auction_amount = sum(row.price for row in auction_rows)
+    total_slots = max(len(teams) * 15, 1)
+    sold_count = len(auction_rows)
+    sold_percentage = round((sold_count / total_slots) * 100, 2)
+
+    role_breakdown = {}
+    unsold_by_role = {}
+    for player in players:
+        role = (player.role or 'Unknown').strip() or 'Unknown'
+        role_breakdown.setdefault(role, {'sold': 0, 'unsold': 0})
+        if player.is_available:
+            role_breakdown[role]['unsold'] += 1
+            unsold_by_role[role] = unsold_by_role.get(role, 0) + 1
+        else:
+            role_breakdown[role]['sold'] += 1
+
+    highest_bid = None
+    if auction_rows:
+        top_row = max(auction_rows, key=lambda x: x.price)
+        highest_bid = {
+            'player_name': top_row.player_ref.name,
+            'team_name': top_row.team.name,
+            'price': top_row.price,
+        }
+
+    teams_summary = []
+    for team in teams:
+        spent = sum(p.price for p in team.players)
+        teams_summary.append({
+            'id': team.id,
+            'name': team.name,
+            'owner': team.owner,
+            'players_count': len(team.players),
+            'spent': spent,
+            'remaining_budget': team.budget - spent,
+            'avg_bid': round(spent / len(team.players), 2) if team.players else 0,
+        })
+
+    teams_summary.sort(key=lambda item: (-item['players_count'], item['remaining_budget']))
+
+    return jsonify({
+        'overview': {
+            'teams_count': len(teams),
+            'players_count': len(players),
+            'sold_players': sold_count,
+            'unsold_players': len(players) - sold_count,
+            'sold_percentage_of_total_slots': sold_percentage,
+            'total_auction_amount': total_auction_amount,
+            'highest_bid': highest_bid,
+        },
+        'role_breakdown': role_breakdown,
+        'unsold_by_role': unsold_by_role,
+        'teams_summary': teams_summary,
     })
 
 
@@ -827,9 +1472,8 @@ def export_team_report_pdf():
     ensure_dir(reports_dir)
     report_path = os.path.join(reports_dir, 'team_players_latest.pdf')
 
-    # Build on demand if not present
-    if not os.path.exists(report_path):
-        build_team_players_pdf(report_path)
+    # Rebuild on every request so data and design are always current.
+    build_team_players_pdf(report_path)
 
     return send_file(
         report_path,
@@ -839,29 +1483,34 @@ def export_team_report_pdf():
     )
 
 
+@app.route('/api/export/bid-report/<int:auction_id>', methods=['GET'])
+def export_bid_report_pdf(auction_id):
+    auctioned = AuctionedPlayer.query.get_or_404(auction_id)
+    cached_path = bid_report_cache_path(auctioned)
+    if not os.path.exists(cached_path):
+        cached_path = save_bid_receipt_pdf(auctioned, cached_path)
+    download_name = secure_filename(f"{auctioned.player_ref.name}_{auctioned.team.name}_bid_report.pdf")
+
+    return send_file(
+        cached_path,
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=download_name
+    )
+
+
 @app.before_request
 def add_predefined_teams():
-    if not hasattr(app, 'predefined_teams_added'):
+    if not hasattr(app, 'schema_ready'):
         db.create_all()
-        print("Adding predefined teams...")
-        predefined_teams = [
-            {"name": "subbi friends", "owner": "pushpak"},
-            {"name": "RCB boys", "owner": "bharath"},
-            {"name": "avi boys", "owner": "anvesh"},
-            {"name": "coconut boys", "owner": "anil"},
-            {"name": "nethravathi enterprises", "owner": "chethan"}
-        ]
-
-        for team in predefined_teams:
-            print(f"Checking team: {team['name']}")
-            if not Team.query.filter_by(name=team['name']).first():
-                print(f"Adding team: {team['name']}")
-                db.session.add(Team(name=team['name'], owner=team['owner']))
-            else:
-                print(f"Team already exists: {team['name']}")
-        db.session.commit()
-        print("Predefined teams added.")
-        app.predefined_teams_added = True
+        app.schema_ready = True
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+
+
+
+
+
+

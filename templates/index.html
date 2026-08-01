@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MPL Cricket League - Auction Management</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=4">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=5">
 </head>
 <body>
     <div class="container">
@@ -40,6 +40,38 @@
                 <div class="stat-card">
                     <h3>Active Teams</h3>
                     <p class="stat-value" id="active-teams">0</p>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Auction Insights</h2>
+                <div class="insights-grid" id="insights-cards">
+                    <div class="stat-card compact">
+                        <h3>Total Auction Amount</h3>
+                        <p class="stat-value" id="insight-total-amount">₹0</p>
+                    </div>
+                    <div class="stat-card compact">
+                        <h3>Sold Slot %</h3>
+                        <p class="stat-value" id="insight-sold-percentage">0%</p>
+                    </div>
+                    <div class="stat-card compact">
+                        <h3>Highest Bid</h3>
+                        <p class="stat-value" id="insight-highest-bid">-</p>
+                    </div>
+                </div>
+
+                <div class="insight-role-table-wrap">
+                    <h3 class="subheading">Role-wise Sold/Unsold</h3>
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Role</th>
+                                <th>Sold</th>
+                                <th>Unsold</th>
+                            </tr>
+                        </thead>
+                        <tbody id="insight-role-body"></tbody>
+                    </table>
                 </div>
             </div>
 
@@ -122,13 +154,26 @@
             <div id="players-feedback" class="feedback"></div>
 
             <div class="section">
+                <h2>Import Players From Google Sheet</h2>
+                <p style="margin-bottom: 12px; color: #475569;">Paste your Google Sheet link once and import all registered players into local DB. After import, app works offline with local data.</p>
+                <div class="form-group" style="display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;">
+                    <input type="url" id="sheet-url" placeholder="https://docs.google.com/spreadsheets/d/..." class="input">
+                    <label style="display: inline-flex; gap: 6px; align-items: center; font-size: 0.9rem; white-space: nowrap;">
+                        <input type="checkbox" id="sheet-include-photos" checked>
+                        Download photos
+                    </label>
+                    <button type="button" id="import-sheet-btn" onclick="importPlayersFromSheet()" class="btn btn-primary">Import</button>
+                </div>
+                <div class="form-group" style="margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <button type="button" onclick="deleteAllPlayers()" class="btn btn-danger">Delete All Players</button>
+                    <span style="font-size: 0.85rem; color: #991b1b;">Clears all players, auction assignments, team logs, and local player photos.</span>
+                </div>
+            </div>
+
+            <div class="section">
                 <h2>Add New Player</h2>
-                <p style="margin-bottom: 12px; color: #475569;">Use a unique jersey / list number as serial. Photos can be uploaded after the player appears below.</p>
+                <p style="margin-bottom: 12px; color: #475569;">Serial number is auto-generated. If you delete a middle player, that serial gets reused automatically for the next new player.</p>
                 <div class="form-group" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
-                    <div>
-                        <label for="player-serial" style="display: block; font-size: 0.85rem; margin-bottom: 4px;">Serial #</label>
-                        <input type="number" id="player-serial" min="1" step="1" placeholder="e.g. 48" class="input" style="width: 100px;">
-                    </div>
                     <div style="flex: 1; min-width: 160px;">
                         <label for="player-add-name" style="display: block; font-size: 0.85rem; margin-bottom: 4px;">Name</label>
                         <input type="text" id="player-add-name" placeholder="Player name" class="input" style="width: 100%;">
@@ -143,6 +188,14 @@
 
             <div class="section">
                 <h2>All Players (Available + Auctioned)</h2>
+                <div class="player-toolbar">
+                    <input type="text" id="player-search-input" class="input" placeholder="Search by serial, name, or role" oninput="applyPlayerFilters()">
+                    <select id="player-status-filter" class="input" onchange="applyPlayerFilters()">
+                        <option value="all">All</option>
+                        <option value="available">Available</option>
+                        <option value="auctioned">Auctioned</option>
+                    </select>
+                </div>
                 <div class="players-grid" id="players-list">
                 </div>
             </div>
@@ -158,6 +211,6 @@
         </section>
     </div>
 
-    <script src="{{ url_for('static', filename='script.js') }}?v=4"></script>
+    <script src="{{ url_for('static', filename='script.js') }}?v=5"></script>
 </body>
 </html>

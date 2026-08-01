@@ -2,11 +2,23 @@
 document.querySelectorAll('.nav-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
         const tabName = e.target.dataset.tab;
-        switchTab(tabName);
+        if (!tabName) return;
+        switchTab(tabName, e.currentTarget);
     });
 });
 
-function switchTab(tabName) {
+let allPlayersCache = [];
+
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function switchTab(tabName, clickedButton) {
     // Hide all tabs
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
@@ -19,7 +31,9 @@ function switchTab(tabName) {
 
     // Show selected tab
     document.getElementById(tabName).classList.add('active');
-    event.target.classList.add('active');
+    if (clickedButton) {
+        clickedButton.classList.add('active');
+    }
 
     // Refresh data when switching tabs
     if (tabName === 'dashboard') {
@@ -36,8 +50,13 @@ function switchTab(tabName) {
 // ===== DASHBOARD =====
 async function loadDashboard() {
     try {
-        const response = await fetch('/api/dashboard');
-        const data = await response.json();
+        const [dashboardResponse, insightsResponse] = await Promise.all([
+            fetch('/api/dashboard'),
+            fetch('/api/insights')
+        ]);
+
+        const data = await dashboardResponse.json();
+        const insights = insightsResponse.ok ? await insightsResponse.json() : null;
 
         document.getElementById('total-players').textContent = data.total_players;
         document.getElementById('available-players').textContent = data.available_players;
@@ -57,6 +76,48 @@ async function loadDashboard() {
             `;
             tbody.innerHTML += row;
         });
+
+        if (insights && insights.overview) {
+            const overview = insights.overview;
+            const totalAmountEl = document.getElementById('insight-total-amount');
+            const soldPctEl = document.getElementById('insight-sold-percentage');
+            const highestBidEl = document.getElementById('insight-highest-bid');
+            const roleBody = document.getElementById('insight-role-body');
+
+            if (totalAmountEl) {
+                totalAmountEl.textContent = `₹${Number(overview.total_auction_amount || 0).toLocaleString()}`;
+            }
+            if (soldPctEl) {
+                soldPctEl.textContent = `${Number(overview.sold_percentage_of_total_slots || 0).toFixed(2)}%`;
+            }
+            if (highestBidEl) {
+                if (overview.highest_bid) {
+                    highestBidEl.textContent = `₹${Number(overview.highest_bid.price || 0).toLocaleString()} (${overview.highest_bid.player_name})`;
+                } else {
+                    highestBidEl.textContent = 'No bids yet';
+                }
+            }
+
+            if (roleBody) {
+                roleBody.innerHTML = '';
+                const entries = Object.entries(insights.role_breakdown || {});
+                if (!entries.length) {
+                    roleBody.innerHTML = '<tr><td colspan="3">No player role data</td></tr>';
+                } else {
+                    entries
+                        .sort((a, b) => a[0].localeCompare(b[0]))
+                        .forEach(([role, stats]) => {
+                            roleBody.innerHTML += `
+                                <tr>
+                                    <td>${escapeHtml(role)}</td>
+                                    <td>${Number(stats.sold || 0)}</td>
+                                    <td>${Number(stats.unsold || 0)}</td>
+                                </tr>
+                            `;
+                        });
+                }
+            }
+        }
     } catch (error) {
         console.error('Error loading dashboard:', error);
     }
@@ -223,16 +284,46 @@ async function loadPlayers() {
         const response = await fetch('/api/players');
         const players = await response.json();
         players.sort((a, b) => a.serial_number - b.serial_number);
+        allPlayersCache = players;
+
+        applyPlayerFilters();
+
+        // Update player dropdown in auction tab
+        updatePlayerDropdown(players);
+    } catch (error) {
+        console.error('Error loading players:', error);
+    }
+}
+
+function applyPlayerFilters() {
+    const searchEl = document.getElementById('player-search-input');
+    const statusEl = document.getElementById('player-status-filter');
+
+    const query = (searchEl?.value || '').trim().toLowerCase();
+    const status = statusEl?.value || 'all';
+
+    const filteredPlayers = allPlayersCache.filter(player => {
+        if (status === 'available' && player.is_available !== true) return false;
+        if (status === 'auctioned' && player.is_available !== false) return false;
+
+        if (!query) return true;
+
+        const serialText = String(player.serial_number || '');
+        const nameText = (player.name || '').toLowerCase();
+        const roleText = (player.role || '').toLowerCase();
+
+        return serialText.includes(query) || nameText.includes(query) || roleText.includes(query);
+    });
 
         const container = document.getElementById('players-list');
         container.innerHTML = '';
 
-        if (players.length === 0) {
+    if (filteredPlayers.length === 0) {
             container.innerHTML = '<p style="grid-column: 1/-1; text-align: center;">No players found. Add a player above or run <code>sync_players_from_ppt.py</code> / <code>add_players_to_db.py</code>.</p>';
             return;
-        }
+    }
 
-        players.forEach(player => {
+    filteredPlayers.forEach(player => {
             const photoHtml = player.photo_url ? 
                 `<img src="${player.photo_url}" alt="${player.name}" class="player-photo" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22150%22%3E%3Crect fill=%22%23ccc%22 width=%22120%22 height=%22150%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 font-size=%2224%22 fill=%22%23999%22 text-anchor=%22middle%22 dominant-baseline=%22middle%22%3E🏏%3C/text%3E%3C/svg%3E'">` : 
                 '<div class="player-avatar">🏏</div>';
@@ -256,27 +347,15 @@ async function loadPlayers() {
             `;
             container.innerHTML += playerCard;
         });
-
-        // Update player dropdown in auction tab
-        updatePlayerDropdown(players);
-    } catch (error) {
-        console.error('Error loading players:', error);
-    }
 }
 
 async function addPlayerManual() {
-    const serialEl = document.getElementById('player-serial');
     const nameEl = document.getElementById('player-add-name');
     const roleEl = document.getElementById('player-add-role');
 
-    const serial = serialEl && serialEl.value !== '' ? parseInt(serialEl.value, 10) : NaN;
     const name = nameEl ? nameEl.value.trim() : '';
     const role = roleEl ? roleEl.value.trim() : '';
 
-    if (!Number.isInteger(serial) || serial < 1) {
-        showFeedback('Enter a valid serial number (whole number ≥ 1).', 'error', 'players');
-        return;
-    }
     if (!name) {
         showFeedback('Enter the player name.', 'error', 'players');
         return;
@@ -287,7 +366,6 @@ async function addPlayerManual() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                serial_number: serial,
                 name,
                 role: role || 'Unknown'
             })
@@ -299,7 +377,6 @@ async function addPlayerManual() {
             showFeedback(`✓ ${result.message}`, 'success', 'players');
             if (nameEl) nameEl.value = '';
             if (roleEl) roleEl.value = '';
-            if (serialEl) serialEl.value = '';
             loadPlayers();
             loadDashboard();
         } else {
@@ -308,6 +385,93 @@ async function addPlayerManual() {
     } catch (error) {
         console.error('Error:', error);
         showFeedback(error.message || 'Error adding player', 'error', 'players');
+    }
+}
+
+async function importPlayersFromSheet() {
+    const urlEl = document.getElementById('sheet-url');
+    const photosEl = document.getElementById('sheet-include-photos');
+    const importBtn = document.getElementById('import-sheet-btn');
+    const sheetUrl = (urlEl?.value || '').trim();
+    const includePhotos = photosEl ? photosEl.checked : true;
+
+    if (!sheetUrl) {
+        showFeedback('Paste Google Sheet URL to import players.', 'error', 'players');
+        return;
+    }
+
+    if (importBtn) {
+        importBtn.disabled = true;
+        importBtn.dataset.originalText = importBtn.textContent || 'Import';
+        importBtn.textContent = includePhotos ? 'Importing with photos...' : 'Importing...';
+    }
+    showFeedback(
+        includePhotos
+            ? 'Import started. Photo downloads can take a few minutes depending on Drive speed. Please wait.'
+            : 'Import started. Please wait...',
+        'success',
+        'players'
+    );
+
+    try {
+        const response = await fetch('/api/players/import/google-sheet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sheet_url: sheetUrl,
+                include_photos: includePhotos
+            })
+        });
+
+        const result = await parseJsonResponse(response);
+
+        if (response.ok) {
+            const msg = `${result.message} Photos saved: ${result.photos_saved || 0}.`;
+            showFeedback(msg, 'success', 'players');
+            loadPlayers();
+            loadDashboard();
+        } else {
+            showFeedback(result.error || 'Failed to import sheet data.', 'error', 'players');
+        }
+    } catch (error) {
+        console.error('Error importing from sheet:', error);
+        showFeedback(error.message || 'Error importing sheet data.', 'error', 'players');
+    } finally {
+        if (importBtn) {
+            importBtn.disabled = false;
+            importBtn.textContent = importBtn.dataset.originalText || 'Import';
+            delete importBtn.dataset.originalText;
+        }
+    }
+}
+
+async function deleteAllPlayers() {
+    const ok = confirm('Delete ALL players? This will also remove all auction rows, team logs, and saved player photos.');
+    if (!ok) return;
+
+    try {
+        const response = await fetch('/api/players/delete-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        const result = await parseJsonResponse(response);
+
+        if (response.ok) {
+            showFeedback(
+                `${result.message} Deleted players: ${result.players_deleted}, photos: ${result.photos_deleted}.`,
+                'success',
+                'players'
+            );
+            loadPlayers();
+            loadDashboard();
+            loadTeams();
+        } else {
+            showFeedback(result.error || 'Failed to delete all players.', 'error', 'players');
+        }
+    } catch (error) {
+        console.error('Error deleting all players:', error);
+        showFeedback(error.message || 'Error deleting all players.', 'error', 'players');
     }
 }
 

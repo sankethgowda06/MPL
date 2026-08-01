@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Player Bidding - MPL Cricket League</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='bidding-live.css') }}?v=3">
+    <link rel="stylesheet" href="{{ url_for('static', filename='bidding-live.css') }}?v=16">
 </head>
 <body>
     <div class="bidding-live-container">
@@ -12,7 +12,10 @@
         <header class="live-header">
             <div class="live-header-top">
                 <h1>🏏 Live Auction System</h1>
-                <a href="/" class="back-btn">← Dashboard</a>
+                <div class="header-actions">
+                    <button type="button" id="presentation-toggle" class="presentation-btn" onclick="togglePresentationMode()">Stage Mode: ON</button>
+                    <a href="/" class="back-btn">← Dashboard</a>
+                </div>
             </div>
             <div class="auction-tools-bar" role="toolbar" aria-label="Auction repair">
                 <button type="button" class="sync-auction-btn" onclick="syncAuctionAvailability()" title="Removes leftover bids for deleted teams and fixes stuck players. Your current teams stay.">↻ Fix player pool</button>
@@ -21,16 +24,26 @@
             </div>
         </header>
 
+        <section class="auction-stage-strip" aria-live="polite">
+            <span class="stage-pill">LIVE</span>
+            <span id="stage-current-player" class="stage-text">No player selected</span>
+            <span id="stage-current-team" class="stage-text muted">Waiting for bid</span>
+            <span id="stage-last-sold" class="stage-text stage-last">Last sold: -</span>
+        </section>
+
         <div class="main-layout">
-            <!-- Left Panel: Teams (30%) -->
+            <!-- Left Panel: Teams / Operator Controls -->
             <div class="left-panel">
-                <h3>Teams - Click to Bid</h3>
+                <div class="left-panel-header">
+                    <h3>Bid Control</h3>
+                    <p>Operator side only</p>
+                </div>
                 <div class="teams-compact-grid" id="teams-grid">
                     <!-- Teams will be populated here -->
                 </div>
             </div>
 
-            <!-- Right Panel: Player Profile (70%) -->
+            <!-- Middle Panel: Search and Player Details -->
             <div class="right-panel">
                 <!-- View Mode Tabs -->
                 <div class="view-tabs">
@@ -42,16 +55,24 @@
                 <div id="bidding-view" class="view-container active">
                     <!-- Search Section -->
                     <div class="search-box">
-                        <label>Search Player:</label>
-                        <div class="search-input-group">
-                            <input type="text" id="player-search" placeholder="Number or Name" class="input-number" onkeypress="handleEnter(event)">
-                            <button onclick="searchPlayer()" class="search-btn">Search</button>
+                        <div class="search-box-header">
+                            <label>Find Player</label>
+                            <span class="search-box-hint">Search by number or name</span>
+                        </div>
+                        <div class="search-controls-row">
+                            <div class="search-input-group">
+                                <input type="text" id="player-search" placeholder="Number or Name" class="input-number" onkeypress="handleEnter(event)">
+                                <button onclick="searchPlayer()" class="search-btn">Search</button>
+                            </div>
                         </div>
                     </div>
+                    <div class="report-actions-bar">
+                        <button type="button" id="download-last-bid-btn" class="report-action-btn secondary" onclick="downloadLastBidReport()" disabled>Last Bid PDF</button>
+                        <button type="button" class="report-action-btn" onclick="downloadTeamReport()">Team Report PDF</button>
+                    </div>
 
-                    <!-- Player Details & Photo Container -->
+                    <!-- Player Details -->
                     <div class="player-display-container">
-                        <!-- Player Details (Left part of right panel) -->
                         <div class="player-details-section">
                             <div id="player-info" class="player-info hidden">
                                 <div id="player-sold-notice" class="player-sold-notice hidden"></div>
@@ -73,14 +94,8 @@
                                 </div>
                             </div>
                             <div id="player-placeholder" class="placeholder">
-                                <p>Enter player number to view details</p>
-                            </div>
-                        </div>
-
-                        <!-- Player Photo (Right part of right panel) -->
-                        <div class="player-photo-section">
-                            <div id="player-photo" class="player-photo">
-                                <div class="photo-placeholder">📷</div>
+                                <p class="placeholder-title">Ready to start bidding</p>
+                                <p class="placeholder-subtitle">Search player number or name, then click a team to place the bid.</p>
                             </div>
                         </div>
                     </div>
@@ -96,6 +111,24 @@
                     </div>
                     <div id="team-players-list" class="team-players-list">
                         <!-- Team players will be populated here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel: Full Player Photo -->
+            <div class="photo-stage-panel">
+                <div class="photo-stage-header">
+                    <h3>Player Photo</h3>
+                    <p>Original full image view</p>
+                </div>
+                <div class="player-photo-section">
+                    <div id="player-photo" class="player-photo">
+                        <div class="photo-placeholder">📷</div>
+                        <div id="sold-overlay" class="sold-overlay hidden">
+                            <div class="sold-stamp">SOLD</div>
+                            <div id="sold-team-name" class="sold-team-name"></div>
+                            <div id="sold-price" class="sold-price"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -134,8 +167,8 @@
                 <div id="bid-error" class="error-message hidden"></div>
 
                 <div class="modal-buttons">
-                    <button onclick="confirmBid()" class="btn-confirm">✓ Confirm Bid</button>
-                    <button onclick="closeBidModal()" class="btn-cancel">✗ Cancel</button>
+                    <button id="confirm-bid-btn" onclick="confirmBid()" class="btn-confirm">✓ Confirm Bid</button>
+                    <button id="cancel-bid-btn" onclick="closeBidModal()" class="btn-cancel">✗ Cancel</button>
                 </div>
             </div>
         </div>
@@ -144,7 +177,7 @@
         <div id="notification" class="notification hidden"></div>
     </div>
 
-    <script src="{{ url_for('static', filename='bidding-live.js') }}?v=3"></script>
+    <script src="{{ url_for('static', filename='bidding-live.js') }}?v=16"></script>
 </body>
 </html>
 
